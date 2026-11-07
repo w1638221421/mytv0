@@ -89,6 +89,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # gh release 需要 .git 才能解析 tag / commit，先检出（不拉 LFS、不取子模块，几秒钟）
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
       - uses: actions/download-artifact@v4
         with:
           path: out
