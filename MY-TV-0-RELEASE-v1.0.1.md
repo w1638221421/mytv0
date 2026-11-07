@@ -11,10 +11,10 @@
 
 ```
 包名      com.lizongying.mytv0
-版本      1.0.1（versionCode 2，可直接覆盖 1.0.0）
+版本      1.0.1（versionCode 16777472，可直接覆盖旧包）
 签名      CN=my-tv-0 Release / SHA-256 74705b9c...6f40d9
-SHA-256   1f6ce9a9...693394  media3-1.11.1.apk
-          1fdeab43...148a7f  media3-1.8.0.apk
+SHA-256   d2ef7b61...e71e87c9  media3-1.11.1.apk
+          68499bad...73ccdb5f  media3-1.8.0.apk
 ```
 
 ```bash
@@ -51,6 +51,9 @@ adb install -r my-tv-0-release-media3-1.8.0.apk
 - 源里写 `CCTV1`，XMLTV 写 `CCTV-1 综合.cn` / `CCTV1高清` → 现在能对上，但 `CCTV1` 不会串到 `CCTV10`；
 - `CCTV5` 和 `CCTV5+` 以前共用同一份节目单 → 现在分开；
 - 源"活着但没当天数据"（例如 51zmt 目前只更到 11-06）会被判失败，自动跳到下一个镜像，不会挡住能用的源。
+
+> 上面是**本地构建**的哈希。GitHub Release 里的包由 CI 构建：同一份源码、同一把签名钥匙，
+> 但字节不同（JDK/R8 非确定性），以 Releases 页面上的文件为准。
 
 ## 4. 验收清单
 

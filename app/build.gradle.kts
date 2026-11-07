@@ -64,15 +64,19 @@ fun getTag(): String {
  */
 fun isSemver(tag: String): Boolean = Regex("^\\d+(\\.\\d+){1,3}$").matches(tag)
 
-fun getVersionCode(): Int {
-    val tag = getTag()
-    if (!isSemver(tag)) return 2
+/** 版本号 → versionCode；和 tag 构建用同一套算法，避免"CI 包 / 本地包互相装不上" */
+fun versionCodeOf(name: String): Int {
     return try {
-        val arr = (tag.replace(".", " ").replace("-", " ") + " 0").split(" ")
+        val arr = (name.replace(".", " ").replace("-", " ") + " 0").split(" ")
         arr[0].toInt() * 16777216 + arr[1].toInt() * 65536 + arr[2].toInt() * 256 + arr[3].toInt()
     } catch (_: Exception) {
-        2
+        1
     }
+}
+
+fun getVersionCode(): Int {
+    val tag = getTag()
+    return versionCodeOf(if (isSemver(tag)) tag else "1.0.1")
 }
 
 fun getVersionName(): String {

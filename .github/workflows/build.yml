@@ -100,4 +100,9 @@ jobs:
       - name: 创建 Release 并上传 apk
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" out/*.apk --generate-notes --title "${{ github.ref_name }}"
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" out/*.apk --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" out/*.apk --generate-notes --title "${GITHUB_REF_NAME}"
+          fi

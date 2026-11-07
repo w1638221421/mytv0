@@ -12,11 +12,11 @@ dist/
 SHA-256：
 
 ```
-1f6ce9a9180080558c8eafe813178cabb8e103424bc667e35f2cf62ae7693394  my-tv-0-release-media3-1.11.1.apk
-1fdeab43aa4552a23a18e1ee57dea1cebd1aee370917ef84d4fdccd397148a7f  my-tv-0-release-media3-1.8.0.apk
+d2ef7b618b6ce056e57603ceafec1464181fea150d77b7bb322a4cf4e71e87c9  my-tv-0-release-media3-1.11.1.apk
+68499bad73657a4ed63c734ef900c1512f470c9556314348875e1b7e73ccdb5f  my-tv-0-release-media3-1.8.0.apk
 ```
 
-版本信息：`versionCode=2`，`versionName=1.0.1`（设置页显示 `v1.0.1`）；包名 `com.lizongying.mytv0` 未变。
+版本信息：`versionCode=16777472`，`versionName=1.0.1`（设置页显示 `v1.0.1`；versionCode 由版本号按 `major*16777216+minor*65536+patch*256` 算出，与 tag 构建一致）；包名 `com.lizongying.mytv0` 未变。
 
 签名证书：`CN=my-tv-0 Release`，证书 SHA-256
 `74705b9cb4892e3f5489b8f4527b7658b758d227e6dd81c8bbb015cc3f6f40d9`
