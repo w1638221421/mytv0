@@ -39,8 +39,10 @@ jobs:
       # 仓库默认是 1.8.0 兼容版；矩阵里直接改这四行切内核
       - name: 切换 Media3 内核
         run: |
-          sed -i "s/^media3 = .*/media3 = \"${{ matrix.media3 }}\"/" gradle/libs.versions.toml
-          sed -i "s/^kotlin-android = .*/kotlin-android = \"${{ matrix.kotlin }}\"/" gradle/libs.versions.toml
+          # 只改 [versions] 段：`kotlin-android = "2.0.0"`（带引号的纯版本号），
+          # 不能误伤 [plugins] 里的 `kotlin-android = { id = ..., version.ref = ... }`
+          sed -i "s|^media3 = .*|media3 = \"${{ matrix.media3 }}\"|" gradle/libs.versions.toml
+          sed -i "s|^kotlin-android = \"[0-9.]*\"$|kotlin-android = \"${{ matrix.kotlin }}\"|" gradle/libs.versions.toml
           sed -i "s/^    compileSdk = .*/    compileSdk = ${{ matrix.compileSdk }}/" app/build.gradle.kts
           sed -i "s/^        minSdk = .*/        minSdk = ${{ matrix.minSdk }}/" app/build.gradle.kts
           grep -E '^(media3|kotlin-android)' gradle/libs.versions.toml
