@@ -1,0 +1,26 @@
+# ---- 构建产物 / 缓存 ----
+build/
+.gradle/
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---- 交付产物（体积大，走 Release 附件，不进仓库）----
+dist/
+releases/
+*.apk
+*.aab
+*.idsig
+
+# ---- 签名材料（私钥绝不入库）----
+keystore/
+*.jks
+*.keystore
+
+# ---- 系统垃圾 ----
+.DS_Store
+Thumbs.db
+*.log

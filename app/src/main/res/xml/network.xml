@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      默认只信任系统 CA，且启用严格的主机名校验。
+      IPTV 大量使用明文 http/rtsp/rtmp，因此保留明文放行；
+      这不影响任何 HTTPS 请求的证书与域名校验。
+      调试构建可额外信任用户安装的 CA（方便抓包），发布版不信任。
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>
