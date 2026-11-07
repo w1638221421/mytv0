@@ -57,21 +57,27 @@ fun getTag(): String {
     }
 }
 
+/**
+ * 形如 1.0.1 / 1.3.9.8 的 tag 才当版本号。
+ * 分支提交上 `git describe --tags --always` 会返回 commit hash，这种一律走兜底 1.0.1，
+ * 避免 CI 里打出 versionName=e09159e 这种包。
+ */
+fun isSemver(tag: String): Boolean = Regex("^\\d+(\\.\\d+){1,3}$").matches(tag)
+
 fun getVersionCode(): Int {
+    val tag = getTag()
+    if (!isSemver(tag)) return 2
     return try {
-        val arr = (getTag().replace(".", " ").replace("-", " ") + " 0").split(" ")
+        val arr = (tag.replace(".", " ").replace("-", " ") + " 0").split(" ")
         arr[0].toInt() * 16777216 + arr[1].toInt() * 65536 + arr[2].toInt() * 256 + arr[3].toInt()
     } catch (_: Exception) {
-        // 无 git 环境（zip 源码构建）下的正式版本号：1.0.1
         2
     }
 }
 
 fun getVersionName(): String {
-    return getTag().ifEmpty {
-        // 无 git 环境（zip 源码构建）下的正式版本号
-        "1.0.1"
-    }
+    val tag = getTag()
+    return if (isSemver(tag)) tag else "1.0.1"
 }
 
 dependencies {
