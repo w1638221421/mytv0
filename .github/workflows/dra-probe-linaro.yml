@@ -1,0 +1,115 @@
+name: dra-probe-linaro
+# 目的：验证「编译器」是不是起不来的原因
+#   出厂内核串：Linux version 4.4.95+ (jslave@...) (gcc version 6.3.1 20170109 (Linaro GCC 6.3-2017.02))
+#   → 用同一个 Linaro 6.3.1 工具链，配置仍是出厂原样，看能不能起来
+#   同时产出 Image.gz-dtb（内核自带 DTB），用于"DTB 来源"对比
+on:
+  push:
+    branches: [probe-linaro]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git wget xz-utils
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          python -V
+
+      - name: Linaro 6.3.1 工具链（与出厂内核同一版）
+        run: |
+          set -e
+          URL="https://releases.linaro.org/components/toolchain/binaries/6.3-2017.02/aarch64-linux-gnu/gcc-linaro-6.3.1-2017.02-x86_64_aarch64-linux-gnu.tar.xz"
+          wget -q --tries=3 --timeout=60 "$URL" -O /tmp/linaro.tar.xz || \
+            wget -q --tries=3 --timeout=60 "https://snapshot.debian.org/archive/debian/20180101T000000Z/pool/main/g/gcc-6-cross/gcc-6-aarch64-linux-gnu_6.3.0.orig.tar.xz" -O /tmp/linaro.tar.xz
+          mkdir -p "$GITHUB_WORKSPACE/tc"
+          tar -xf /tmp/linaro.tar.xz -C "$GITHUB_WORKSPACE/tc" --strip-components=1
+          ls "$GITHUB_WORKSPACE/tc/bin" | head
+          "$GITHUB_WORKSPACE/tc/bin/aarch64-linux-gnu-gcc" --version | head -2
+
+      - name: source + stock config
+        run: |
+          set -e
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          head -5 kernel/Makefile
+          cp stock.config kernel/stock.config
+          mkdir -p kernel/out
+          cp stock.config kernel/out/.config
+
+      - name: build hotfixes（只保留"不修就编不过"的那些）
+        run: |
+          set -e
+          cd kernel
+          # SCHED_DEBUG=n -> const_debug=const，MTK 的 sched_ctl.c 要写它，必须去 const
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          # 过滤源码树里不存在的 imgsensor / LCM
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' out/.config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x" || echo "DROP sensor: $x"; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' out/.config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || echo "DROP lcm: $x"; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+          echo "$K2" | grep -q holitech_ili9881c_5p45_hd_video || { echo FATAL 面板丢失; exit 1; }
+          # CMA_DEBUG 被 select 强制打开
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/tc/bin/aarch64-linux-gnu-"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config || true
+          echo "=== 与原厂差异 ==="
+          python3 - <<'PY'
+          def load(p):
+              d={}
+              for l in open(p,errors='ignore'):
+                  l=l.strip()
+                  if l.startswith('CONFIG_') and '=' in l: k,v=l.split('=',1); d[k]=v
+                  elif l.startswith('# CONFIG_') and l.endswith('is not set'): d[l[2:].split(' is not')[0]]='n'
+              return d
+          s=load('stock.config'); n=load('out/.config')
+          ch=[(k,s.get(k),n.get(k)) for k in sorted(set(s)|set(n)) if s.get(k)!=n.get(k)]
+          print("changed: %d" % len(ch))
+          for k,a,b in ch: print("  %s: stock=%s new=%s" % (k,a,b))
+          PY
+
+      - name: build（重点：这次编译器与出厂一致）
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/tc/bin/aarch64-linux-gnu-"
+          export PATH="$GITHUB_WORKSPACE/tc/bin:$PATH"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" Image
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" Image.gz-dtb || true
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" dtbs || true
+          ls -l out/arch/arm64/boot/ | head -20
+          find out/arch/arm64/boot/dts -name '*.dtb' | head -10
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          for f in Image.gz Image.gz-dtb; do
+            [ -f "kernel/out/arch/arm64/boot/$f" ] && cp "kernel/out/arch/arm64/boot/$f" artifact/ || true
+          done
+          mkdir -p artifact/dts
+          find kernel/out/arch/arm64/boot/dts -name '*.dtb' -exec cp {} artifact/dts/ \; 2>/dev/null || true
+          cp kernel/out/.config artifact/config.txt
+          echo "$GITHUB_REF_NAME" > artifact/MODE.txt
+          (cd artifact && sha256sum * 2>/dev/null | head -30)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-linaro
+          path: artifact/
