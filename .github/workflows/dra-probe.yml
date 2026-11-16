@@ -1,0 +1,127 @@
+name: dra-probe
+# 二分法探针：同一个 stock.config，按分支决定"只加哪一组选项"
+#   probe-stock : 完全不加（只做 LCM/sensor 过滤 + 编译修补）→ 验证"源码/打包能不能出可开机的内核"
+#   probe-min   : 只加 命名空间/IPC/mqueue/cgroup_device 这 7 项 → 验证 Droidspaces 的最小必需集
+on:
+  push:
+    branches: [probe-stock, probe-min]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bc bison flex libssl-dev python2.7 libpython2.7-stdlib git
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          python -V
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: source + stock config
+        run: |
+          set -e
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          cp stock.config kernel/stock.config
+          mkdir -p kernel/out
+          cp stock.config kernel/out/.config
+          echo "MODE=$GITHUB_REF_NAME"
+
+      - name: build hotfixes（源码修补，与已验证流程一致）
+        run: |
+          set -e
+          cd kernel
+          # SCHED_DEBUG=y 时 sysctl_sched_migration_cost 是 const，但 MTK 的 sched_ctl.c 要写它
+          # （华为内部树改过这里，公开树没改 -> 必须自己打这个小补丁）
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          grep -n "sysctl_sched_migration_cost" drivers/misc/mediatek/sched/sched_ctl.c | head -3
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+          # 过滤源码树里不存在的 imgsensor / LCM（原厂点名了 hjc 面板和 3 个 sensor，树里没有）
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' out/.config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x" || echo "DROP sensor: $x"; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' out/.config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || echo "DROP lcm: $x"; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+          grep -E '^CONFIG_CUSTOM_KERNEL_(LCM|IMGSENSOR)=' out/.config
+          echo "本机面板 holitech_ili9881c_5p45_hd_video 保留检查:"
+          echo "$K2" | grep -q holitech_ili9881c_5p45_hd_video && echo "OK 面板驱动在位" || { echo "FATAL 面板驱动被削"; exit 1; }
+
+      - name: 按分支加选项
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          case "$GITHUB_REF_NAME" in
+            probe-stock)
+              echo "[probe-stock] 不加任何额外选项"
+              ;;
+            probe-min)
+              echo "[probe-min] 只加 Droidspaces 最小必需集"
+              scripts/config --file out/.config \
+                --enable NAMESPACES --enable PID_NS --enable UTS_NS --enable IPC_NS \
+                --enable SYSVIPC --enable POSIX_MQUEUE --enable CGROUP_DEVICE
+              ;;
+            *) echo "未知分支"; exit 1 ;;
+          esac
+          # CMA_DEBUG 被 select 强制打开，原厂是 n
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config || true
+
+          echo "=== 与原厂的差异 ==="
+          python3 - <<'PY'
+          def load(p):
+              d={}
+              for l in open(p,errors='ignore'):
+                  l=l.strip()
+                  if l.startswith('CONFIG_') and '=' in l: k,v=l.split('=',1); d[k]=v
+                  elif l.startswith('# CONFIG_') and l.endswith('is not set'): d[l[2:].split(' is not')[0]]='n'
+              return d
+          s=load('stock.config'); n=load('out/.config')
+          ch=[(k,s.get(k),n.get(k)) for k in sorted(set(s)|set(n)) if s.get(k)!=n.get(k)]
+          print("changed: %d" % len(ch))
+          for k,a,b in ch: print("  %s: stock=%s new=%s" % (k,a,b))
+          PY
+
+      - name: build
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image Image.gz
+          ls -l out/arch/arm64/boot/Image out/arch/arm64/boot/Image.gz
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          cp kernel/out/arch/arm64/boot/Image.gz artifact/Image.gz
+          cp kernel/out/.config artifact/config.txt
+          echo "$GITHUB_REF_NAME" > artifact/MODE.txt
+          (cd artifact && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ github.ref_name }}
+          path: artifact/
