@@ -160,7 +160,12 @@ jobs:
               "\t}\n")
           n2="\tstats = &no_dev_stats;\n"
           assert o1 in s and o2 in s, 'xt_qtaguid 上下文不匹配'
-          open(p,'w').write(s.replace(o1,n1).replace(o2,n2))
+          # 注意：o1 这个声明在本文件里有 3 处（三个函数各一份），
+          # 只能替换第一处（iface_stat_fmt_proc_show），否则另外两个函数会报 dev_stats undeclared
+          s = s.replace(o1, n1, 1).replace(o2, n2, 1)
+          assert s.count('dev_stats') - s.count('no_dev_stats') == 4, 'dev_stats 残留数异常: %d' % (s.count('dev_stats') - s.count('no_dev_stats'))
+          assert 'dev_get_stats(iface_entry->net_dev' not in s, '危险调用仍在'
+          open(p,'w').write(s)
           print('[+] patch 01 ok')
           PY
 
