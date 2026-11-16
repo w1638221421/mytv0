@@ -1,0 +1,110 @@
+name: dra-probe-mark
+# 目的：给内核插"黑匣子标记"，用 expdb 里的最后一个标记定位死点
+#   A: start_kernel 入口
+#   B: setup_arch 之后
+#   C: console_init 之后
+#   D: rest_init 入口
+#   E: kernel_init 入口（准备 exec /init）
+#   F: run_init_process 之前
+on:
+  push:
+    branches: [probe-mark]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bc bison flex libssl-dev python2.7 libpython2.7-stdlib git
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          python -V
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: source + config + hotfixes + 黑匣子标记
+        run: |
+          set -e
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          cp stock.config kernel/stock.config
+          mkdir -p kernel/out
+          cp stock.config kernel/out/.config
+          cd kernel
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' out/.config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x" || true; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' out/.config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || true; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
+
+          python3 - <<'PY'
+          p='init/main.c'
+          s=open(p).read()
+          def put(anchor, mark, before=True):
+              global s
+              assert anchor in s, 'anchor not found: %r' % anchor[:40]
+              ins = '\tpr_err("DRAMARK_%s\\n");\n' % mark
+              s = s.replace(anchor, (ins+anchor) if before else (anchor+ins), 1)
+          # A: start_kernel 入口
+          put("asmlinkage __visible void __init start_kernel(void)\n{\n", "A_start_kernel", before=False)
+          # B: setup_arch 之后
+          put("\tsetup_arch(&command_line);\n", "B_after_setup_arch", before=False)
+          # C: console_init 之后
+          put("\tconsole_init();\n", "C_after_console_init", before=False)
+          # D: rest_init 调用
+          put("\trest_init();\n", "D_before_rest_init")
+          # E/F: kernel_init 里（注意都要落在函数体内，不能插在文件作用域）
+          put("static int __ref kernel_init(void *unused)\n{\n", "E_kernel_init_enter", before=False)
+          put("if (execute_command) {\n", "F_before_exec_init")
+          open(p,'w').write(s)
+          print('[+] markers injected')
+          PY
+          grep -n "DRAMARK_" init/main.c
+
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config || true
+
+      - name: build
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image
+          ls -l out/arch/arm64/boot/Image
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          cp kernel/out/.config artifact/config.txt
+          echo "$GITHUB_REF_NAME" > artifact/MODE.txt
+          (cd artifact && sha256sum Image config.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-mark
+          path: artifact/
