@@ -67,10 +67,14 @@ jobs:
             --enable IPV6_MULTIPLE_TABLES --enable IP6_NF_IPTABLES --enable IP6_NF_FILTER \
             --enable IP6_NF_MANGLE --enable IP6_NF_NAT --enable IP6_NF_TARGET_MASQUERADE \
             --enable IP_NF_TARGET_REJECT --enable IP6_NF_TARGET_REJECT \
-            --enable NETFILTER_XT_TARGET_LOG --enable NETFILTER_XT_MATCH_OWNER \
+            --enable NETFILTER_XT_TARGET_LOG \
             --enable NETFILTER_XT_MATCH_HASHLIMIT --enable NETFILTER_XT_MATCH_PKTTYPE \
             --enable IP_SET --enable IP_SET_HASH_IP --enable IP_SET_HASH_NET --enable NETFILTER_XT_SET \
-            --enable NETFILTER_NETLINK_QUEUE --enable NETFILTER_NETLINK_LOG --enable NETFILTER_XT_TARGET_NFLOG
+            --enable NETFILTER_NETLINK_QUEUE --enable NETFILTER_NETLINK_LOG --enable NETFILTER_XT_TARGET_NFLOG \
+            --disable NETFILTER_XT_MATCH_OWNER --enable NETFILTER_XT_MATCH_QTAGUID
+
+          # ★ NETFILTER_XT_MATCH_QTAGUID 依赖 OWNER=n（原厂就是 owner 关、qtaguid 开）。
+          #   打开 OWNER 会把 Android 的流量统计(qtaguid)挤掉，所以这里明确 owner=n、qtaguid=y。
 
           # ★ 关键：Android paranoid network 只放行 AID_INET 组的 socket，容器里的 root 不在组内 -> 容器无网
           scripts/config --file out/.config --disable ANDROID_PARANOID_NETWORK
@@ -213,6 +217,7 @@ jobs:
           [ -z "$BAD" ] || { echo "FATAL missing:$BAD"; exit 1; }
           grep -q '^CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config && { echo "FATAL: paranoid network 没关"; exit 1; }
           grep -q '^CONFIG_CMA_DEBUG=y' out/.config && { echo "FATAL: CMA_DEBUG 复活"; exit 1; }
+          grep -q '^CONFIG_NETFILTER_XT_MATCH_QTAGUID=y' out/.config || { echo "FATAL: qtaguid 被 OWNER 挤掉了"; exit 1; }
           grep -q 'Droidspaces/LXC' kernel/cgroup.c || echo "(warn) cgroup 补丁未打"
           grep -q 'stats = &no_dev_stats;' net/netfilter/xt_qtaguid.c
           echo "[+] all good"
