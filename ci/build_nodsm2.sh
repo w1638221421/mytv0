@@ -17,6 +17,8 @@ cd "$K"
 
 echo "=== 注入 printk 打点 ==="
 python3 "$WS/ci/patch_fbv3.py" init/main.c
+python3 "$WS/ci/patch_dsm_skip.py" .
+grep -n "DRAPIX: 跳过 DSM" drivers/dsm/dsm_earlyboot_client/dsm_earlyboot_client.c || true
 grep -n "DI%u" init/main.c | head -3
 
 export ARCH=arm64
