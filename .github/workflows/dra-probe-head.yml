@@ -1,0 +1,82 @@
+name: dra-probe-head
+# 极早期打点：在 head.S 的 stext 第一行（MMU 关闭时）直接写显存
+# 目的：回答"LK 到底有没有跳到我们的内核"
+on:
+  push:
+    branches: [probe-head]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bc bison flex libssl-dev python2.7 libpython2.7-stdlib git
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          python -V
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: source + config + hotfixes + stext 打点
+        run: |
+          set -e
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          cp stock.config kernel/stock.config
+          mkdir -p kernel/out
+          cp stock.config kernel/out/.config
+          cd kernel
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            if [ -f "$f" ]; then sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true; fi
+          done
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' out/.config | cut -d'"' -f2)
+          K=""
+          for x in $S; do if [ -d "$D/$x" ]; then K="$K $x"; fi; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' out/.config | cut -d'"' -f2)
+          K2=""
+          for x in $C; do if [ -d "$L/$x" ]; then K2="$K2 $x"; fi; done
+          scripts/config --file out/.config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          export ARCH=arm64 CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config || true
+          python3 "$GITHUB_WORKSPACE/patch_head.py"
+          grep -n "DRAPIX" arch/arm64/kernel/head.S
+
+      - name: build
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64 CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image
+          ls -l out/arch/arm64/boot/Image
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          cp kernel/out/.config artifact/config.txt
+          echo "$GITHUB_REF_NAME" > artifact/MODE.txt
+          (cd artifact && sha256sum Image)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-head
+          path: artifact/
