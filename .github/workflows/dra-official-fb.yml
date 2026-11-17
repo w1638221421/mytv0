@@ -1,0 +1,67 @@
+name: dra-official-fb
+# 官方源码 + 官方 defconfig + 打开 VT/fbcon（把内核日志打到屏幕），cmdline 加 console=tty0
+on:
+  push:
+    branches: [official-fb]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git wget
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python || true
+
+      - name: 下载官方源码包
+        run: |
+          set -e
+          URL="https://download-c1.huawei.com/download/downloadCenter?downloadId=5E5F1FF8BAE2D3B6C865452D95215F2F&version=E3B4C5DDCF2BB14EF20527C810B6E308&siteCode=worldwide"
+          wget -q --tries=3 --timeout=180 -U "Mozilla/5.0" -O /tmp/dura.gz "$URL"
+          mkdir -p src
+          tar -xzf /tmp/dura.gz -C src --wildcards 'Code_Opensource/kernel-4.4/*' || true
+          du -sh src/Code_Opensource/kernel-4.4
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: build（defconfig + VT/fbcon）
+        run: |
+          set -e
+          cd src/Code_Opensource/kernel-4.4
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" dura64_defconfig
+          scripts/config --file out/.config \
+            --enable VT --enable VT_CONSOLE --enable HW_CONSOLE --enable DUMMY_CONSOLE \
+            --enable FRAMEBUFFER_CONSOLE --enable FRAMEBUFFER_CONSOLE_DETECT_PRIMARY \
+            --enable FONT_8x16 --enable LOGO --enable PRINTK_TIME
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          echo "=== 显示/日志相关 ==="
+          grep -E "^CONFIG_(VT|VT_CONSOLE|FRAMEBUFFER_CONSOLE|HW_CONSOLE|DUMMY_CONSOLE|FONT_8x16|PSTORE|MTK_FB)=" out/.config || true
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image
+          ls -l out/arch/arm64/boot/Image
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp src/Code_Opensource/kernel-4.4/out/arch/arm64/boot/Image artifact/Image
+          cp src/Code_Opensource/kernel-4.4/out/System.map artifact/System.map
+          cp src/Code_Opensource/kernel-4.4/out/vmlinux artifact/vmlinux || true
+          cp src/Code_Opensource/kernel-4.4/out/.config artifact/config.txt
+          echo "official-fb" > artifact/MODE.txt
+          (cd artifact && sha256sum Image)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-fb-image
+          path: artifact/
