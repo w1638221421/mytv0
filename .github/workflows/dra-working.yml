@@ -1,0 +1,48 @@
+name: dra-working
+# 复现"已被验证能开机"的配置配方（uefi2333/dra-rksu-ci 的 stock-align 方案，去掉 KernelSU）
+# 关键差异：dura64_defconfig + dura64_board_AL00A_defconfig + HZ=300 + FINAL_RELEASE=y + 关 debug 项
+on:
+  push:
+    branches: [working]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存官方源码包
+        uses: actions/cache@v4
+        with:
+          path: src/dura.gz
+          key: dura-oreo-emui8-opensource-416mb-v1
+
+      - name: 在 ubuntu:18.04 里构建
+        run: |
+          set -e
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/w" \
+            -w /w \
+            -e ROOT=/w \
+            -e GCC49=/w/gcc49 \
+            ubuntu:18.04 bash -c '
+              set -e
+              apt-get update -qq
+              apt-get install -y --no-install-recommends ca-certificates git wget xz-utils >/dev/null
+              git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 /w/gcc49 >/dev/null 2>&1
+              bash /w/ci/build_working.sh
+            '
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp out/* artifact/ 2>/dev/null || true
+          ls -l artifact | head -20
+          (cd artifact && sha256sum Image config.txt 2>/dev/null || true)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: working-image
+          path: artifact/
