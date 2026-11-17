@@ -1,0 +1,47 @@
+name: dra-gcc63
+# GCC 6.3（Debian 9） + "确认能开机"的 LOS 内核 config 重编官方源码，并产出 Image.gz-dtb
+on:
+  push:
+    branches: [gcc63]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存官方源码包
+        uses: actions/cache@v4
+        with:
+          path: src/dura.gz
+          key: dura-oreo-emui8-opensource-416mb-v1
+
+      - name: 在 debian:stretch 里用 gcc-6 构建
+        run: |
+          set -e
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/w" -w /w -e ROOT=/w \
+            debian:stretch bash -c '
+              set -e
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                ca-certificates wget xz-utils make bc bison flex libssl-dev libelf-dev \
+                python3 gcc g++ libc6-dev gcc-6-aarch64-linux-gnu >/dev/null
+              # 用 gcc-6 交叉编译器（debian 的 aarch64-linux-gnu-gcc 默认是 gcc-6）
+              aarch64-linux-gnu-gcc --version | head -1
+              bash /w/ci/build_gcc63.sh
+            '
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp out/* artifact/ 2>/dev/null || true
+          ls -l artifact | head
+          (cd artifact && sha256sum Image config.txt 2>/dev/null || true)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gcc63-image
+          path: artifact/
