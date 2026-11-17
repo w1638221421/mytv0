@@ -24,8 +24,9 @@ jobs:
             -v "$GITHUB_WORKSPACE:/w" -w /w -e ROOT=/w \
             debian:stretch bash -c '
               set -e
-              apt-get update -qq
-              apt-get install -y --no-install-recommends \
+              printf "deb http://archive.debian.org/debian stretch main\ndeb http://archive.debian.org/debian-security stretch/updates main\n" > /etc/apt/sources.list
+              apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Retries=3 update -qq
+              apt-get -o Acquire::Check-Valid-Until=false install -y --no-install-recommends \
                 ca-certificates wget xz-utils make bc bison flex libssl-dev libelf-dev \
                 python3 gcc g++ libc6-dev gcc-6-aarch64-linux-gnu >/dev/null
               # 用 gcc-6 交叉编译器（debian 的 aarch64-linux-gnu-gcc 默认是 gcc-6）
