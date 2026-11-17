@@ -1,0 +1,34 @@
+name: dra-tc-gcc75
+# 工具链对照实验：Ubuntu 18.04 的 gcc 7.5 交叉编译器，出厂 config
+# checkout 在宿主机做（容器里 Node 跑不动），编译脚本在 ci/build_gcc75.sh
+on:
+  push:
+    branches: [tc-gcc75]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 在 ubuntu:18.04 里用 gcc 7.5 编译
+        run: |
+          set -e
+          sed -i 's/\r$//' ci/build_gcc75.sh
+          docker run --rm -v "$GITHUB_WORKSPACE:/w" -w /w ubuntu:18.04 bash /w/ci/build_gcc75.sh
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          cp kernel/out/.config artifact/config.txt
+          cp kernel/out/GCC_VERSION.txt artifact/ || true
+          echo "$GITHUB_REF_NAME" > artifact/MODE.txt
+          (cd artifact && sha256sum Image config.txt && cat GCC_VERSION.txt || true)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tc-gcc75
+          path: artifact/
