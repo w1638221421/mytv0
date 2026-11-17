@@ -1,0 +1,70 @@
+name: dra-official
+# 严格按华为官方 README 构建：
+#   1) 下载 Dura_OREO__EMUI8.0_opensource.gz（官方 2018 OREO 源码包）
+#   2) 解压 Code_Opensource/kernel-4.4
+#   3) make ARCH=arm64 O=out dura64_defconfig
+#   4) make ARCH=arm64 O=out -j Image      （CROSS_COMPILE=aarch64-linux-android-4.9）
+#   5) 不改任何内核源码（不注入 sched 补丁、不改 Makefile 警告选项）
+on:
+  push:
+    branches: [official]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git wget
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python || true
+          python -V
+
+      - name: 下载官方源码包
+        run: |
+          set -e
+          URL="https://download-c1.huawei.com/download/downloadCenter?downloadId=5E5F1FF8BAE2D3B6C865452D95215F2F&version=E3B4C5DDCF2BB14EF20527C810B6E308&siteCode=worldwide"
+          wget -q --tries=3 --timeout=120 -U "Mozilla/5.0" -O /tmp/dura.gz "$URL"
+          ls -l /tmp/dura.gz
+          mkdir -p src
+          tar -xzf /tmp/dura.gz -C src --wildcards 'Code_Opensource/kernel-4.4/*' 'Code_Opensource/README*' || true
+          du -sh src/Code_Opensource/kernel-4.4
+          ls src/Code_Opensource/kernel-4.4 | head
+
+      - name: toolchain（官方要求的 aarch64-linux-android-4.9）
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: build（官方配方，零源码改动）
+        run: |
+          set -e
+          cd src/Code_Opensource/kernel-4.4
+          head -5 Makefile
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" dura64_defconfig
+          echo "=== 关键配置 ==="
+          grep -E "^CONFIG_(SCHED_DEBUG|CUSTOM_KERNEL_LCM|LOG_BUF_SHIFT|NAMESPACES|CGROUP_DEVICE|DEVTMPFS|POSIX_MQUEUE)=" out/.config || true
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image || {
+            echo "=== 首次失败，打印末尾错误 ==="; exit 1; }
+          ls -l out/arch/arm64/boot/Image
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp src/Code_Opensource/kernel-4.4/out/arch/arm64/boot/Image artifact/Image
+          cp src/Code_Opensource/kernel-4.4/out/.config artifact/config.txt
+          echo "official" > artifact/MODE.txt
+          (cd artifact && sha256sum Image config.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-image
+          path: artifact/
