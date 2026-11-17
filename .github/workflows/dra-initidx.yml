@@ -1,0 +1,69 @@
+name: dra-initidx
+# 官方源码 + 官方 defconfig + "initcall 序号打屏"补丁（不启用 VT，避免 fbcon 清屏）
+# 屏幕左上角 11 个 8x8 方块 = 当前 initcall 序号的二进制（bit0 最左，白色=1）
+on:
+  push:
+    branches: [initidx]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git wget
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python || true
+
+      - name: 下载官方源码包
+        run: |
+          set -e
+          URL="https://download-c1.huawei.com/download/downloadCenter?downloadId=5E5F1FF8BAE2D3B6C865452D95215F2F&version=E3B4C5DDCF2BB14EF20527C810B6E308&siteCode=worldwide"
+          wget -q --tries=3 --timeout=180 -U "Mozilla/5.0" -O /tmp/dura.gz "$URL"
+          mkdir -p src
+          tar -xzf /tmp/dura.gz -C src --wildcards 'Code_Opensource/kernel-4.4/*' || true
+          du -sh src/Code_Opensource/kernel-4.4
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+
+      - name: 注入 initcall 序号打屏补丁
+        run: |
+          set -e
+          cd src/Code_Opensource/kernel-4.4
+          python3 "$GITHUB_WORKSPACE/patch_initidx.py"
+          grep -n "drapix_index" init/main.c
+
+      - name: build
+        run: |
+          set -e
+          cd src/Code_Opensource/kernel-4.4
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" dura64_defconfig
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image
+          ls -l out/arch/arm64/boot/Image out/System.map
+          grep -c " __initcall" out/System.map || true
+
+      - name: package
+        run: |
+          set -e
+          mkdir -p artifact
+          cp src/Code_Opensource/kernel-4.4/out/arch/arm64/boot/Image artifact/Image
+          cp src/Code_Opensource/kernel-4.4/out/System.map artifact/System.map
+          grep -E "__initcall" src/Code_Opensource/kernel-4.4/out/System.map > artifact/initcalls.txt || true
+          wc -l artifact/initcalls.txt || true
+          cp src/Code_Opensource/kernel-4.4/out/.config artifact/config.txt
+          echo "initidx" > artifact/MODE.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: initidx
+          path: artifact/
