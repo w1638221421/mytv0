@@ -1,0 +1,39 @@
+name: dra-di
+# VT+fbcon 打点：initcall 逐条 printk，屏幕冻结在死点
+on:
+  push:
+    branches: [addr]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git wget
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python || true
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python2 || true
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 gcc49
+          gcc49/bin/aarch64-linux-android-gcc --version | head -1
+
+      - name: build
+        run: bash ci/build_addr.sh
+
+      - name: package
+        run: |
+          set -e
+          ls -l out
+          mkdir -p artifact && cp out/* artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addr-image
+          path: artifact/
