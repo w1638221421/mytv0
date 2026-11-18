@@ -1,5 +1,5 @@
 #!/bin/bash
-# 原厂 config + 强制打开控制台 + VT/fbcon（把内核日志和 init 日志刷到屏幕上）
+# 原厂 config + 强制控制台 + 内核对 framebuffer 直接渲文字
 set -e
 WS="${GITHUB_WORKSPACE:-/w}"
 cd "$WS"
@@ -22,12 +22,14 @@ scripts/config --file out/.config \
   --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov8856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw ov5675_mipi_raw" \
   --set-str CUSTOM_KERNEL_LCM "txd_ili9881c_5p45_hd_video truly_nt35521z_5p45_hd_video holitech_ili9881c_5p45_hd_video sky_ili9881p_5p45_hd_video txd_ft8006u_5p45_hd_video boyi_hx8394f_5p45_hd_video" \
   --enable SCHED_DEBUG --enable VT --enable VT_CONSOLE --enable HW_CONSOLE \
-  --enable FRAMEBUFFER_CONSOLE --enable DUMMY_CONSOLE --enable LOGO --enable FB
+  --enable FRAMEBUFFER_CONSOLE --enable DUMMY_CONSOLE --enable LOGO --enable FB \
+  --enable FONTS --enable FONT_8x16
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 olddefconfig
-grep -E "^CONFIG_(VT|VT_CONSOLE|FRAMEBUFFER_CONSOLE|LOGO|CMDLINE_FROM_BOOTLOADER|MTK_MD1_SUPPORT)=" out/.config || true
+grep -E "^CONFIG_(VT|FRAMEBUFFER_CONSOLE|FONT_8x16|FONTS|FB)=" out/.config || true
 
 python3 "$WS/ci/patch_console.py" kernel/printk/printk.c
-grep -c "DRAPIX_FORCE_CONSOLE" kernel/printk/printk.c
+python3 "$WS/ci/patch_fbtext.py" kernel/printk/printk.c
+grep -c "DRAPIX_FBTEXT" kernel/printk/printk.c
 
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" python=python2 -j"$(nproc)" Image
 mkdir -p "$WS/out"
