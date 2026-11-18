@@ -1,5 +1,5 @@
 #!/bin/bash
-# v10：原厂 config + 容器选项 + VT/fbcon（点亮屏幕）+ 每 10 秒日志快照；串口保持关闭
+# v10：原厂 config + 容器选项 + VT/fbcon + 关键行日志快照 + SELinux permissive
 set -e
 WS="${GITHUB_WORKSPACE:-/w}"
 cd "$WS"
@@ -24,21 +24,22 @@ export PATH="$WS/gcc49/bin:$PATH"
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 dura64_defconfig
 cp "$WS/ci/config_stock.txt" out/.config
 scripts/config --file out/.config \
-  --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov10856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw ov5675_mipi_raw" \
+  --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov8856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw ov5675_mipi_raw" \
   --set-str CUSTOM_KERNEL_LCM "txd_ili9881c_5p45_hd_video truly_nt35521z_5p45_hd_video holitech_ili9881c_5p45_hd_video sky_ili9881p_5p45_hd_video txd_ft8006u_5p45_hd_video boyi_hx8394f_5p45_hd_video" \
   --enable SCHED_DEBUG --enable FONTS --enable FONT_8x16 \
   --enable VT --enable VT_CONSOLE --enable HW_CONSOLE --enable FRAMEBUFFER_CONSOLE --enable DUMMY_CONSOLE --enable LOGO \
   --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS --enable NET_NS --enable USER_NS \
   --enable CGROUP_DEVICE --enable CGROUP_FREEZER --enable CGROUP_SCHED --enable MEMCG \
   --enable DEVTMPFS --enable POSIX_MQUEUE --enable VETH --enable BRIDGE --enable OVERLAY_FS \
-  --enable CMDLINE_EXTEND --disable CMDLINE_FROM_BOOTLOADER --set-str CMDLINE "androidboot.selinux=permissive"
+  --enable CMDLINE_EXTEND --disable CMDLINE_FROM_BOOTLOADER --disable CMDLINE_FORCE \
+  --set-str CMDLINE "androidboot.selinux=permissive"
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 olddefconfig
 
-echo "--- 关键项 ---"
-grep -E "^CONFIG_(VT|VT_CONSOLE|FRAMEBUFFER_CONSOLE|FONT_8x16|NAMESPACES|NET_NS|CGROUP_DEVICE|CMDLINE_FROM_BOOTLOADER)=" out/.config || true
+echo "--- cmdline 与关键项 ---"
+grep -E "^CONFIG_(CMDLINE|CMDLINE_EXTEND|CMDLINE_FROM_BOOTLOADER|VT|FRAMEBUFFER_CONSOLE|FONT_8x16|NAMESPACES|NET_NS|CGROUP_DEVICE|SECURITY_SELINUX_DEVELOP)=" out/.config || true
 
 python3 "$WS/ci/patch_dump.py" kernel/printk/printk.c
-grep -c "DRAPIX_DUMP" kernel/printk/printk.c
+grep -c "DRAPIX" kernel/printk/printk.c
 
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" python=python2 -j"$(nproc)" Image
 ls -l out/arch/arm64/boot/Image
