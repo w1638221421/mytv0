@@ -21,10 +21,10 @@ inject = r'''
  */
 static int __init drapix_force_console(void)
 {
-	printk_disable_uart = 2;
+	printk_disable_uart = 1;   /* 关掉慢速串口控制台，只保留我们自己的 fb 渲染 */
 	console_printk[0] = 8;
 	console_printk[1] = 8;
-	printk("DRAPIX: console forced ON (disable_uart=2, loglevel=8)\n");
+	printk("DRAPIX: uart console OFF, fb text ON, loglevel=8\n");
 	return 0;
 }
 early_initcall(drapix_force_console);
