@@ -7,9 +7,9 @@ if "DRAPIX_DUMP" in s:
     sys.exit(0)
 
 code = r'''
-/* ===================== DRAPIX_DUMP =====================
- * 每 10 秒把内核日志缓冲区最后 28 行一次性画到 framebuffer。
- * 不逐条渲染，绝不影响启动速度；屏幕始终显示最近的日志尾巴。
+/* ===================== DRAPIX_DUMP v2 =====================
+ * 每 10 秒把内核日志里"关键行"（init/avc/adbd/zygote/...）的最后 26 行
+ * 一次性画到 framebuffer。不逐条渲染，不影响启动速度。
  */
 #include <linux/fb.h>
 #include <linux/font.h>
@@ -19,7 +19,36 @@ static struct fb_info *dra_fb;
 static const struct font_desc *dra_font;
 static int dra_ok, dra_cx, dra_cy, dra_cols, dra_rows;
 static u32 dra_line, dra_bpp, dra_fw, dra_fh, dra_bpr;
-static char dra_tail[1600];
+static char dra_tail[2048];
+
+static const char *dra_keys[] = {
+	"init:", "init ", "avc:", "adbd", "zygote", "Zygote",
+	"system_server", "Binder", "vold", "panic", "BUG:",
+	"Unable to", "failed", "error", "Kernel panic",
+	"SurfaceFlinger", "audit", "DRAPIX", "SELinux", "selinux"
+};
+
+static int dra_match(const char *t, int len)
+{
+	unsigned k;
+	int i, j;
+	for (k = 0; k < sizeof(dra_keys) / sizeof(dra_keys[0]); k++) {
+		const char *k2 = dra_keys[k];
+		int kl = 0;
+		while (k2[kl])
+			kl++;
+		if (kl > len)
+			continue;
+		for (i = 0; i + kl <= len; i++) {
+			for (j = 0; j < kl; j++)
+				if (t[i + j] != k2[j])
+					break;
+			if (j == kl)
+				return 1;
+		}
+	}
+	return 0;
+}
 
 static void dra_px(u32 x, u32 y)
 {
@@ -100,7 +129,7 @@ static void dra_dump(void)
 {
 	unsigned long flags;
 	u32 idx;
-	int tl = 0, n = 0, start = 0, i;
+	int tl = 0, i;
 	char hdr[56];
 
 	if (!dra_init())
@@ -111,18 +140,23 @@ static void dra_dump(void)
 	while (idx != log_next_idx) {
 		struct printk_log *msg = log_from_idx(idx);
 		const char *t = log_text(msg);
-		u16 len = msg->text_len, k;
+		int len = msg->text_len;
 
-		for (k = 0; k < len; k++) {
-			if (tl >= (int)sizeof(dra_tail) - 1)
-				break;
-			dra_tail[tl++] = t[k];
+		if (dra_match(t, len)) {
+			int k;
+			for (k = 0; k < len; k++) {
+				if (tl >= (int)sizeof(dra_tail) - 1)
+					break;
+				dra_tail[tl++] = t[k];
+			}
+			if (tl < (int)sizeof(dra_tail) - 1)
+				dra_tail[tl++] = '\n';
+			if (tl >= (int)sizeof(dra_tail) - 1) {
+				memmove(dra_tail, dra_tail + 900, tl - 900);
+				tl -= 900;
+			}
 		}
 		idx = log_next(idx);
-		if (tl >= (int)sizeof(dra_tail) - 1) {
-			memmove(dra_tail, dra_tail + 600, tl - 600);
-			tl -= 600;
-		}
 	}
 	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
 
@@ -130,27 +164,11 @@ static void dra_dump(void)
 		return;
 	dra_tail[tl] = 0;
 
-	/* 找最后 28 行的起点 */
-	n = tl - 1;
-	if (n > 0)
-		n--;
-	for (i = n; i >= 0; i--) {
-		if (dra_tail[i] == '\n') {
-			start++;
-			if (start >= 28)
-				break;
-		}
-	}
-	if (i < 0)
-		start = 0;
-	else
-		start = i + 1;
-
 	dra_clear();
-	snprintf(hdr, sizeof(hdr), "== DRAPIX uptime=%us ==", (unsigned)(jiffies / HZ));
+	snprintf(hdr, sizeof(hdr), "== DRAPIX KEYLOG uptime=%us ==", (unsigned)(jiffies / HZ));
 	dra_puts(hdr);
 	dra_char('\n');
-	for (i = start; i < tl; i++)
+	for (i = 0; i < tl; i++)
 		dra_char(dra_tail[i]);
 }
 
@@ -182,4 +200,4 @@ if not m:
     sys.exit(1)
 s = s[:m.start()] + code + "\n" + s[m.start():]
 open(p, "w", encoding="utf8", newline="\n").write(s)
-print("[+] DRAPIX_DUMP 注入成功")
+print("[+] DRAPIX_DUMP v2（关键行过滤）注入成功")
