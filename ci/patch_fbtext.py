@@ -5,8 +5,9 @@ if "DRAPIX_FBTEXT" in s:
     print("[-] 已打过"); sys.exit(0)
 
 code = r'''
-/* ===================== DRAPIX_FBTEXT =====================
- * 把内核日志逐字渲染到 framebuffer（完全绕开 console / VT 子系统）
+/* ===================== DRAPIX_FBTEXT v2 =====================
+ * 把内核日志渲染到 framebuffer；清屏/滚屏用 memset/memmove 批量操作，
+ * 避免逐像素 MMIO 把启动拖慢 100 倍。
  */
 #include <linux/fb.h>
 #include <linux/font.h>
@@ -15,24 +16,24 @@ code = r'''
 static struct fb_info *drfb;
 static const struct font_desc *drfont;
 static int dr_on, dr_cx, dr_cy, dr_cols, dr_rows;
-static u32 dr_xres, dr_yres, dr_line, dr_bpp;
+static u32 dr_xres, dr_yres, dr_line, dr_bpp, dr_fh, dr_fw, dr_fbpr;
 
 static void dr_px(u32 x, u32 y, u32 on)
 {
-	void __iomem *base = drfb->screen_base;
 	u32 off = y * dr_line + x * (dr_bpp >> 3);
+	void __iomem *p = drfb->screen_base + off;
 	if (dr_bpp == 32)
-		writel(on ? 0x00ffffff : 0, base + off);
+		writel(on ? 0x00ffffff : 0, p);
 	else
-		writew(on ? 0xffff : 0, base + off);
+		writew(on ? 0xffff : 0, p);
 }
 
-static void dr_clear_rows(int from, int n)
+static void dr_clear_block(u32 y0, u32 h)
 {
-	int j; u32 i;
-	for (j = 0; j < n * drfont->height; j++)
-		for (i = 0; i < dr_xres; i++)
-			dr_px(i, from * drfont->height + j, 0);
+	/* 整行整行地 memset，一次一行 */
+	u32 i;
+	for (i = 0; i < h; i++)
+		memset(drfb->screen_base + (y0 + i) * dr_line, 0, dr_line);
 }
 
 static void dr_init(void)
@@ -49,37 +50,39 @@ static void dr_init(void)
 	dr_bpp  = drfb->var.bits_per_pixel;
 	if (dr_bpp != 16 && dr_bpp != 32) return;
 	if (!dr_line || !dr_xres || !dr_yres) return;
-	dr_cols = dr_xres / drfont->width;
-	dr_rows = dr_yres / drfont->height;
+	dr_fw = drfont->width;
+	dr_fh = drfont->height;
+	dr_fbpr = (dr_fw + 7) / 8;
+	dr_cols = dr_xres / dr_fw;
+	dr_rows = dr_yres / dr_fh;
 	if (dr_cols < 8 || dr_rows < 4) return;
 	dr_cx = 0; dr_cy = 0;
-	dr_clear_rows(0, dr_rows);
+	dr_clear_block(0, dr_rows * dr_fh);
 	dr_on = 1;
 }
 
 static void dr_scroll(void)
 {
-	u32 h = drfont->height;
+	u32 h = dr_fh;
 	memmove(drfb->screen_base,
 		drfb->screen_base + dr_line * h,
 		dr_line * h * (dr_rows - 1));
-	dr_clear_rows(dr_rows - 1, 1);
+	dr_clear_block((dr_rows - 1) * h, h);
 }
 
 static void dr_char(char c)
 {
 	const unsigned char *g;
-	int i, j, w = drfont->width, h = drfont->height;
-	int bpr = (w + 7) / 8;
+	u32 i, j;
 	if (c == '\r') return;
 	if (c == '\n') {
 		dr_cx = dr_cols;
 	} else if (c >= 32 && c < 127) {
-		g = drfont->data + (unsigned char)c * h * bpr;
-		for (j = 0; j < h; j++)
-			for (i = 0; i < w; i++)
-				if (g[j * bpr + (i >> 3)] & (0x80 >> (i & 7)))
-					dr_px(dr_cx * w + i, dr_cy * h + j, 1);
+		g = drfont->data + (unsigned char)c * dr_fh * dr_fbpr;
+		for (j = 0; j < dr_fh; j++)
+			for (i = 0; i < dr_fw; i++)
+				if (g[j * dr_fbpr + (i >> 3)] & (0x80 >> (i & 7)))
+					dr_px(dr_cx * dr_fw + i, dr_cy * dr_fh + j, 1);
 		dr_cx++;
 	}
 	if (dr_cx >= dr_cols) {
@@ -100,19 +103,13 @@ static void dr_text(const char *t, size_t len)
 
 m = re.search(r"static void call_console_drivers\(", s)
 if not m:
-    print("[-] 找不到 call_console_drivers 定义"); sys.exit(1)
+    print("[-] 找不到 call_console_drivers"); sys.exit(1)
 s = s[:m.start()] + code + "\n" + s[m.start():]
 anchor = "trace_console_rcuidle(text, len);"
 k = s.find(anchor)
 if k < 0:
-    anchor = "for_each_console(con) {"
-    k = s.find(anchor)
-if k < 0:
-    print("[-] 找不到插入点"); sys.exit(1)
+    print("[-] 找不到 trace_console_rcuidle"); sys.exit(1)
 ins = k + len(anchor)
 s = s[:ins] + "\n\tdr_text(text, len);" + s[ins:]
 open(p, "w", encoding="utf8", newline="\n").write(s)
-if "dr_text(text, len)" in s:
-    print("[+] FB 文字渲染注入成功")
-else:
-    print("[!] 注入失败"); sys.exit(1)
+print("[+] FB 渲染器 v2（批量清屏/滚屏）注入成功")
