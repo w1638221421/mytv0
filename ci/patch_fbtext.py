@@ -102,10 +102,14 @@ m = re.search(r"static void call_console_drivers\(", s)
 if not m:
     print("[-] 找不到 call_console_drivers 定义"); sys.exit(1)
 s = s[:m.start()] + code + "\n" + s[m.start():]
-m = re.search(r"static void call_console_drivers\([^)]*\)\s*\{", s)
-if not m:
-    print("[-] 找不到函数体起始"); sys.exit(1)
-ins = m.end()
+anchor = "trace_console_rcuidle(text, len);"
+k = s.find(anchor)
+if k < 0:
+    anchor = "for_each_console(con) {"
+    k = s.find(anchor)
+if k < 0:
+    print("[-] 找不到插入点"); sys.exit(1)
+ins = k + len(anchor)
 s = s[:ins] + "\n\tdr_text(text, len);" + s[ins:]
 open(p, "w", encoding="utf8", newline="\n").write(s)
 if "dr_text(text, len)" in s:
