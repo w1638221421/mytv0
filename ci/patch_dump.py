@@ -176,11 +176,20 @@ static void dra_dump(void)
 
 static struct timer_list dra_timer;
 
+static int dra_count;
+
 static void dra_tick(unsigned long data)
 {
-	dra_dump();
-	dra_timer.expires = jiffies + 10 * HZ;
-	add_timer(&dra_timer);
+	dra_count++;
+	if (dra_count <= 6) {
+		dra_dump();                       /* 前 60 秒：每 10 秒快照一次 */
+		dra_timer.expires = jiffies + 10 * HZ;
+		add_timer(&dra_timer);
+	} else if (dra_count == 7) {
+		if (dra_init())
+			dra_clear();              /* 60 秒后清屏，把屏幕还给 Android */
+	}
+	/* 之后不再重装定时器，彻底停手 */
 }
 
 static int __init dra_timer_init(void)
