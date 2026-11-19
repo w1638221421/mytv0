@@ -27,6 +27,7 @@ cp "$WS/ci/los_real.config" out/.config
 scripts/config --file out/.config \
   --set-str LOCALVERSION "+" \
   --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov8856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw ov5675_mipi_raw" \
+  --enable SCHED_DEBUG \
   --enable NAMESPACES \
   --enable PID_NS \
   --enable UTS_NS \
