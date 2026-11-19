@@ -1,7 +1,7 @@
 #!/bin/bash
-# v26: LOS 配置 + 命名空间
-#      + MODVERSIONS=n 且强制 vermagic 含 modversions  -> 让厂商预编译模块能加载
-#      + 去掉 SCHED_DEBUG 依赖（打补丁），使配置尽量与 LOS 一致
+# v26b: LOS 配置 + 命名空间
+#       + 保留 MODVERSIONS=y（vermagic 一致），但让 check_version() 直接放行 -> 厂商预编译模块可加载
+#       + 打补丁去掉 SCHED_DEBUG 依赖（与 LOS 一致，避免 gauge 结构体偏移）
 set -e
 WS="${GITHUB_WORKSPACE:-/w}"
 cd "$WS"
@@ -19,14 +19,17 @@ K="$WS/src/Code_Opensource/kernel-4.4"
 cd "$K"
 
 echo "=== 补丁1: sched_ctl.c 允许无 SCHED_DEBUG 编译 ==="
-f=drivers/misc/mediatek/sched/sched_ctl.c
-sed -i '/sysctl_sched_migration_cost[[:space:]]*=/s/^\([[:space:]]*\)/\1\/\/ DRAPIX: /' $f || true
-grep -n "DRAPIX" $f | head -3 || true
+sed -i '/sysctl_sched_migration_cost[[:space:]]*=/s/^\([[:space:]]*\)/\1\/\/ DRAPIX: /' drivers/misc/mediatek/sched/sched_ctl.c || true
+grep -n "DRAPIX" drivers/misc/mediatek/sched/sched_ctl.c | head -2 || true
 
-echo "=== 补丁2: vermagic 强制含 modversions ==="
-v=include/linux/vermagic.h
-sed -i 's/MODULE_VERMAGIC_MODVERSIONS/"modversions "/' $v
-grep -n "modversions" $v | head -3
+echo "=== 补丁2: module.c 跳过符号 CRC 校验 ==="
+awk '
+/^static int check_version\(/ { infunc=1 }
+infunc && /^\{$/ { print; print "\treturn 1; /* DRAPIX: skip symbol CRC check */"; infunc=0; next }
+{ print }
+' kernel/module.c > /tmp/module.c.new
+mv /tmp/module.c.new kernel/module.c
+grep -n "DRAPIX: skip" kernel/module.c | head -2
 
 export ARCH=arm64
 export CROSS_COMPILE="$WS/gcc49/bin/aarch64-linux-android-"
@@ -38,7 +41,6 @@ cp "$WS/ci/los_real.config" out/.config
 scripts/config --file out/.config \
   --set-str LOCALVERSION "+" \
   --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov8856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw ov5675_mipi_raw" \
-  --disable MODVERSIONS \
   --enable NAMESPACES \
   --enable PID_NS \
   --enable UTS_NS \
