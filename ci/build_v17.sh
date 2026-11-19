@@ -1,5 +1,5 @@
 #!/bin/bash
-# v17: v14 + CONFIG_LOCALVERSION="+" 使 vermagic 与 vendor 模块一致 (4.4.95+)
+# v17: v14 + CONFIG_LOCALVERSION="+"  ->  vermagic 变成 4.4.95+ ，与 vendor 模块一致
 set -e
 WS="${GITHUB_WORKSPACE:-/w}"
 cd "$WS"
@@ -24,17 +24,20 @@ export PATH="$WS/gcc49/bin:$PATH"
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 dura64_defconfig
 cp "$WS/ci/config_v14.txt" out/.config
 scripts/config --file out/.config \
+  --set-str LOCALVERSION "+" \
   --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov8856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw ov5675_mipi_raw" \
   --set-str CUSTOM_KERNEL_LCM "txd_ili9881c_5p45_hd_video truly_nt35521z_5p45_hd_video holitech_ili9881c_5p45_hd_video sky_ili9881p_5p45_hd_video txd_ft8006u_5p45_hd_video boyi_hx8394f_5p45_hd_video" \
-  --set-str LOCALVERSION "+"
   --enable SCHED_DEBUG
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 olddefconfig
 
 echo "--- 关键项核对 ---"
-grep -E "^CONFIG_(CMDLINE|SECCOMP|SECCOMP_FILTER|NAMESPACES|PID_NS|UTS_NS|IPC_NS|NET_NS|USER_NS|CGROUPS|CGROUP_DEVICE|CGROUP_SCHED|CGROUP_PIDS|CGROUP_FREEZER|MEMCG|CFS_BANDWIDTH|DEVTMPFS|BLK_DEV_LOOP|EXT4_FS|OVERLAY_FS|SYSVIPC|POSIX_MQUEUE|VT|FRAMEBUFFER_CONSOLE|SECURITY_SELINUX)=" out/.config || true
+grep -E "^CONFIG_(LOCALVERSION|SECCOMP|NAMESPACES|PID_NS|CGROUPS|MEMCG|OVERLAY_FS|MODVERSIONS|MODULE_UNLOAD|SMP|PREEMPT)=" out/.config || true
 
 make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" python=python2 -j"$(nproc)" Image
 ls -l out/arch/arm64/boot/Image
+
+echo "--- 生成的 vermagic 核对 ---"
+strings out/arch/arm64/boot/Image | grep -m3 "^4\.4\.95" || true
 
 mkdir -p "$WS/out"
 cp out/arch/arm64/boot/Image "$WS/out/"
