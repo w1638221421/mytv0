@@ -22,6 +22,7 @@ ROOTS = [
     'drivers/devkit',
     'security',
     'drivers/mmc/host/mediatek',
+    'drivers/watchdog/mediatek',
     'drivers/misc/mediatek',
 ]
 CLIMB = 2          # how many parent levels to add as include paths

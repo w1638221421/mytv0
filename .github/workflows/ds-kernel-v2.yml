@@ -94,7 +94,8 @@ jobs:
         run: |
           set -e
           cd repo/kernel-4.4
-          python3 "$GITHUB_WORKSPACE/tools/fix_includes_smart.py" .
+          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
+          python3 "$GITHUB_WORKSPACE/tools/fix_sensor_lists.py" .
 
       - name: build
         run: |
