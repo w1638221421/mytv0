@@ -1,0 +1,54 @@
+name: ds-kernel-v2
+
+# MT6739 / DUA-AL00 / linux 4.4.95
+# 目标：在不动任何闭源 vendor 模块的前提下，给内核加上 Droidspaces 必需的 namespace。
+# 手段：① 配置增量压到 5 项；② 把 CONFIG_SYSVIPC 的 task_struct 成员搬到结构体尾部，
+#       使所有既有字段偏移保持不变（预编译 .ko 的硬编码偏移因此仍然成立）；
+#       ③ 用原厂同款 Linaro GCC 6.3.1；④ 双构建（stock 基线 / target）做可验证对比。
+# 绝不使用：CRC 绕过补丁、FG 结构硬改、SW_BRAND 改动、NET_NS/USER_NS/DEVTMPFS 等。
+
+on:
+  push:
+    branches: [ds-kernel-v2]
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    name: baseline (stock config, no patch)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev xz-utils git python3 make gcc
+      - name: build
+        run: bash build.sh stock
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ds-baseline
+          path: artifacts/*
+          if-no-files-found: warn
+
+  target:
+    name: target (5 namespace options + layout-preserving patch)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev xz-utils git python3 make gcc
+      - name: build
+        run: bash build.sh target
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ds-target
+          path: artifacts/*
+          if-no-files-found: warn
