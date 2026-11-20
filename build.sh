@@ -21,38 +21,51 @@ git clone --depth 1 -b "$SRC_REF" "$SRC_REPO" kernel || die "clone kernel source
 grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' kernel/Makefile
 
 # ---------------------------------------------------------------- 2) toolchain
-# The stock kernel was built with "Linaro GCC 6.3-2017.02". releases.linaro.org no
-# longer serves that path (it returns an HTML page with HTTP 200), so we take the
-# same compiler from a public prebuilt tree and keep a snapshot mirror as fallback.
-step "2) toolchain (Linaro GCC 6.3-2017.02)"
+# Linaro's own release mirrors now serve an HTML page (HTTP 200) instead of the old
+# 6.3.1 tarball, so we use complete prebuilt Android GCC 4.9 trees and verify each
+# candidate with a real compile. CRC values come from genksyms over the source, not
+# from the compiler, so the CRC gate is unaffected by the GCC version.
+step "2) toolchain (prebuilt aarch64 GCC, smoke-tested)"
 TC_DIR=""
-try_tc() { # $1 = bin dir
-  [ -x "$1/aarch64-linux-gnu-gcc" ] || return 1
-  export PATH="$1:$PATH"
-  export CROSS_COMPILE=aarch64-linux-gnu-
-  "$1/aarch64-linux-gnu-gcc" --version | head -1
-  TC_DIR="$1"
+TC_PREFIX=""
+
+try_tc() { # $1 = bin dir, $2 = target prefix
+  [ -x "$1/$2gcc" ] || return 1
+  echo 'int main(void){return 0;}' > /tmp/tc_smoke.c
+  if PATH="$1:$PATH" "$1/$2gcc" -c /tmp/tc_smoke.c -o /tmp/tc_smoke.o 2>/dev/null; then
+    export PATH="$1:$PATH"
+    export CROSS_COMPILE="$2"
+    TC_DIR="$1"; TC_PREFIX="$2"
+    "$1/$2gcc" --version | head -1
+    return 0
+  fi
+  echo "  (cc1 missing / unusable: $1)"
+  return 1
 }
 
+# candidate A: prebuilt android-4.9 inside the source prebuilt tree
 rm -rf toolrepo
 if git clone --depth 1 --filter=blob:none --sparse \
      "${TOOLREPO:-https://github.com/jmpfbmx/android_kernel_mt6739.git}" toolrepo >/dev/null 2>&1; then
-  ( cd toolrepo && git sparse-checkout set prebuilts/gcc/linux-x86/aarch64/aarch64-linux-gnu-6.3.1 ) >/dev/null 2>&1 || true
-  try_tc "$WS/toolrepo/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-gnu-6.3.1/bin" || TC_DIR=""
+  ( cd toolrepo && git sparse-checkout set prebuilts/gcc/linux-x86/aarch64 ) >/dev/null 2>&1 || true
+  for cand in aarch64-linux-android-4.9 aarch64-linux-gnu-6.3.1; do
+    try_tc "$WS/toolrepo/prebuilts/gcc/linux-x86/aarch64/$cand/bin" "aarch64-linux-android-" && break
+    try_tc "$WS/toolrepo/prebuilts/gcc/linux-x86/aarch64/$cand/bin" "aarch64-linux-gnu-" && break
+  done
 fi
 
+# candidate B: standalone toolchain repo
 if [ -z "$TC_DIR" ]; then
-  step "2b) fallback: snapshots.linaro.org"
-  URL="https://snapshots.linaro.org/gnu-toolchain/6.3-2017.02/aarch64-linux-gnu/gcc-linaro-6.3.1-2017.02-x86_64_aarch64-linux-gnu.tar.xz"
-  mkdir -p tc
-  curl -fsSL --retry 3 "$URL" -o tc.tar.xz || die "toolchain download failed"
-  tar -xJf tc.tar.xz -C tc --strip-components=1 || die "toolchain extract failed"
-  try_tc "$WS/tc/bin" || die "no usable aarch64-linux-gnu-gcc"
+  step "2b) fallback: KudProject/aarch64-linux-android-4.9"
+  rm -rf kud_tc
+  git clone --depth 1 "${KUD_TOOL:-https://github.com/KudProject/aarch64-linux-android-4.9}" kud_tc \
+    || die "toolchain clone failed"
+  try_tc "$WS/kud_tc/bin" "aarch64-linux-android-" || die "no usable cross compiler"
 fi
 
 export ARCH=arm64
-command -v aarch64-linux-gnu-gcc || die "cross compiler not on PATH"
-echo "toolchain: $(readlink -f "$(command -v aarch64-linux-gnu-gcc)")"
+echo "toolchain: $TC_DIR ($TC_PREFIX)"
+command -v "${TC_PREFIX}gcc" || die "cross compiler not on PATH"
 
 # ---------------------------------------------------------------- 3) config
 step "3) config"
