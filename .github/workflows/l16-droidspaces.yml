@@ -120,24 +120,6 @@ jobs:
             [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
 
-          # 4) Droidspaces 官方 non-GKI 补丁 01：xt_qtaguid（不打它，跑容器后内核空指针 -> 手机重启）
-          python3 - <<'PY'
-          p='net/netfilter/xt_qtaguid.c'
-          s=open(p).read()
-          o1="\tstruct rtnl_link_stats64 dev_stats, *stats;\n"
-          n1="\tstruct rtnl_link_stats64 *stats;\n"
-          o2=("\tif (iface_entry->active) {\n"
-              "\t\tstats = dev_get_stats(iface_entry->net_dev,\n"
-              "\t\t\t\t      &dev_stats);\n"
-              "\t} else {\n"
-              "\t\tstats = &no_dev_stats;\n"
-              "\t}\n")
-          n2="\tstats = &no_dev_stats;\n"
-          assert o1 in s and o2 in s, 'xt_qtaguid 上下文不匹配'
-          open(p,'w').write(s.replace(o1,n1).replace(o2,n2))
-          print('[+] patch 01 ok')
-          PY
-
           # 5) 官方补丁 02：cgroup file prefix（官方版面向 4.5+ 的 kernel/cgroup/cgroup.c，
           #    本机 4.4 在 kernel/cgroup.c，按同样的语义落地）
           python3 - <<'PY'
@@ -190,7 +172,6 @@ jobs:
           grep -q '^CONFIG_ANDROID_PARANOID_NETWORK=y' out/.config && { echo "FATAL: paranoid network 没关"; exit 1; }
           grep -q '^CONFIG_CMA_DEBUG=y' out/.config && { echo "FATAL: CMA_DEBUG 复活"; exit 1; }
           grep -q 'Droidspaces/LXC' kernel/cgroup.c || echo "(warn) cgroup 补丁未打"
-          grep -q 'stats = &no_dev_stats;' net/netfilter/xt_qtaguid.c
           echo "[+] all good"
 
       - name: build
