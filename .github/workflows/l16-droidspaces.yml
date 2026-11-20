@@ -195,6 +195,45 @@ jobs:
               print('[!] patch 02 anchor=%d，跳过（不阻塞）' % s.count(anchor))
           PY
 
+      - name: vendor 兼容补丁（电量/WiFi/CRC）
+        run: |
+          set -e
+          cd kernel
+          # 补丁B: 跳过符号 CRC 校验（vendor 二进制模块与重编内核 CRC 不一致）
+          sed -i 's/if (!crc)/if (1)/' kernel/module.c
+          grep -q 'if (1)' kernel/module.c && echo "[+] patch B (CRC) ok"
+
+          # 补丁C: 电量计 custom 结构体补 8 字节 (736->744)
+          python3 - <<'PY'
+          p="drivers/power/mediatek/battery/mtk_battery_internal.h"
+          s=open(p,encoding="utf8",errors="ignore").read()
+          i = s.find("int apsleep_battery_voltage_compensate;")
+          assert i != -1, "apsleep field not found"
+          j = s.find("};", i)
+          assert j != -1, "struct end not found"
+          if "drapix_reserved8" not in s:
+              s = s[:j] + "\tunsigned long long drapix_reserved8; /* +8 bytes: fuel_gauge_custom_data 736->744 */\n" + s[j:]
+              open(p,"w",encoding="utf8").write(s)
+          print("[+] patch C (FG) ok")
+          PY
+
+          # 补丁D: WiFi 符号 connectivity_export_dump_thread_state
+          python3 - <<'PY'
+          h="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.h"
+          c="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.c"
+          hs=open(h,encoding="utf8",errors="ignore").read()
+          if "connectivity_export_dump_thread_state" not in hs:
+              hs=hs.replace("void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);",
+                "void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);\nvoid connectivity_export_dump_thread_state(struct task_struct *tsk);")
+              open(h,"w",encoding="utf8").write(hs)
+          cs=open(c,encoding="utf8",errors="ignore").read()
+          if "connectivity_export_dump_thread_state(struct task_struct" not in cs:
+              cs=cs.replace("EXPORT_SYMBOL(connectivity_export_show_stack);",
+                "EXPORT_SYMBOL(connectivity_export_show_stack);\n\nvoid connectivity_export_dump_thread_state(struct task_struct *tsk)\n{\n\t/* no-op stub for newer vendor wmt_drv */\n}\nEXPORT_SYMBOL(connectivity_export_dump_thread_state);")
+              open(c,"w",encoding="utf8").write(cs)
+          print("[+] patch D (WiFi) ok")
+          PY
+
       - name: 断言（Droidspaces must have）
         run: |
           set -e
