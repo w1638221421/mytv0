@@ -74,6 +74,10 @@ echo "+" > .scmversion          # force vermagic "4.4.95+" to match the stock mo
 cp "$WS/configs/stock.config" .config
 [ -s .config ] || die "stock.config missing/empty"
 
+# The device config has CMA_DEBUG off; olddefconfig would otherwise flip it on in
+# this tree, which changes allocator behaviour for no benefit. Keep parity.
+scripts/config --file .config --disable CMA_DEBUG
+
 if [ "$MODE" = "target" ]; then
   # NET_NS / USER_NS default to y once NAMESPACES is on, but NET_NS changes the
   # layout of `struct net` and would invalidate the CRC of every networking module
@@ -117,11 +121,21 @@ for k in sorted(set(a) | set(b)):
 PY
 
 step "6) build Image.gz"
+mkdir -p "$WS/artifacts"
+# modern host GCC (>=10) defaults to -fno-common, which breaks the in-tree dtc of 4.4
+python3 "$WS/tools/fix_host_tools.py" . || die "host tool fix failed"
 set +e
-make -j"$(nproc)" Image.gz 2>&1 | tail -40
-rc=${PIPESTATUS[0]}
+make -j"$(nproc)" HOSTCFLAGS="-fcommon -O2 -std=gnu89 -w" Image.gz > "$WS/artifacts/build-$MODE.log" 2>&1
+rc=$?
 set -e
-[ "$rc" -eq 0 ] || die "kernel build failed (rc=$rc)"
+if [ "$rc" -ne 0 ]; then
+  echo "--- error lines from build log:"
+  grep -nE "error:|Error [0-9]|multiple definition|undefined reference|No rule to make" "$WS/artifacts/build-$MODE.log" | head -25
+  echo "--- last 25 lines:"
+  tail -25 "$WS/artifacts/build-$MODE.log"
+  die "kernel build failed (rc=$rc)"
+fi
+tail -5 "$WS/artifacts/build-$MODE.log"
 
 step "7) results"
 echo "--- kernel.release: $(cat include/config/kernel.release)"
