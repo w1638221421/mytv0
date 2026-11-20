@@ -45,32 +45,13 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
 
           scripts/config --file out/.config \
-            --enable SYSCTL --enable SYSVIPC --enable POSIX_MQUEUE \
-            --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS --enable NET_NS --enable USER_NS \
+            --enable SYSVIPC --enable POSIX_MQUEUE \
+            --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS \
             --enable SECCOMP --enable SECCOMP_FILTER \
-            --enable CGROUPS --enable CGROUP_DEVICE --enable CGROUP_SCHED --enable FAIR_GROUP_SCHED \
-            --enable CGROUP_FREEZER --enable CGROUP_CPUACCT --enable CGROUP_NET_PRIO --enable CGROUP_PIDS \
-            --enable MEMCG --enable MEMCG_SWAP --enable CFS_BANDWIDTH \
-            --enable DEVTMPFS --disable DEVTMPFS_MOUNT --enable OVERLAY_FS \
+            --enable CGROUPS --enable CGROUP_FREEZER --enable CGROUP_DEVICE \
+            --enable DEVTMPFS --enable OVERLAY_FS \
             --enable TMPFS_POSIX_ACL --enable TMPFS_XATTR \
-            --enable FW_LOADER --enable FW_LOADER_USER_HELPER --enable FW_LOADER_COMPRESS \
-            --enable BLK_DEV_LOOP --enable EXT4_FS --enable FUSE_FS --enable TUN --enable BINFMT_MISC \
-            --enable VETH --enable BRIDGE --enable BRIDGE_NETFILTER --enable MACVLAN \
-            --enable NETFILTER --enable NETFILTER_ADVANCED --enable NF_CONNTRACK --enable NF_TABLES \
-            --enable IP_NF_IPTABLES --enable IP_NF_FILTER --enable IP_NF_NAT \
-            --enable IP_NF_TARGET_MASQUERADE --enable NETFILTER_XT_TARGET_MASQUERADE \
-            --enable NETFILTER_XT_TARGET_TCPMSS --enable NETFILTER_XT_MATCH_ADDRTYPE \
-            --enable NETFILTER_XT_MATCH_CONNTRACK --enable NF_NAT --enable NF_NAT_REDIRECT \
-            --enable NF_CONNTRACK_NETLINK --enable NETFILTER_XTABLES --enable NETFILTER_XT_NAT \
-            --enable NETFILTER_XT_TARGET_REDIRECT \
-            --enable IP_ADVANCED_ROUTER --enable IP_MULTIPLE_TABLES \
-            --enable IPV6_MULTIPLE_TABLES --enable IP6_NF_IPTABLES --enable IP6_NF_FILTER \
-            --enable IP6_NF_MANGLE --enable IP6_NF_NAT --enable IP6_NF_TARGET_MASQUERADE \
-            --enable IP_NF_TARGET_REJECT --enable IP6_NF_TARGET_REJECT \
-            --enable NETFILTER_XT_TARGET_LOG --enable NETFILTER_XT_MATCH_OWNER \
-            --enable NETFILTER_XT_MATCH_HASHLIMIT --enable NETFILTER_XT_MATCH_PKTTYPE \
-            --enable IP_SET --enable IP_SET_HASH_IP --enable IP_SET_HASH_NET --enable NETFILTER_XT_SET \
-            --enable NETFILTER_NETLINK_QUEUE --enable NETFILTER_NETLINK_LOG --enable NETFILTER_XT_TARGET_NFLOG
+            --enable BLK_DEV_LOOP --enable EXT4_FS --enable FUSE_FS --enable TUN
 
           # ★ 关键：Android paranoid network 只放行 AID_INET 组的 socket，容器里的 root 不在组内 -> 容器无网
           scripts/config --file out/.config --disable ANDROID_PARANOID_NETWORK
@@ -97,12 +78,9 @@ jobs:
           make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
           scripts/config --file out/.config \
             --disable CMA_DEBUG --disable CMA_DEBUGFS \
-            --enable NAMESPACES --enable PID_NS --enable IPC_NS --enable NET_NS --enable USER_NS \
-            --enable SYSVIPC --enable POSIX_MQUEUE --enable CGROUP_DEVICE --enable MEMCG \
-            --enable MEMCG_SWAP --enable CFS_BANDWIDTH --enable CGROUP_PIDS \
-            --enable DEVTMPFS --enable TMPFS_POSIX_ACL --enable TMPFS_XATTR --enable FW_LOADER_COMPRESS \
-            --enable VETH --enable NF_TABLES --enable NETFILTER_XT_MATCH_ADDRTYPE \
-            --enable IP6_NF_NAT --enable IP6_NF_TARGET_MASQUERADE --enable MACVLAN \
+            --enable NAMESPACES --enable PID_NS --enable IPC_NS \
+            --enable SYSVIPC --enable POSIX_MQUEUE --enable CGROUP_DEVICE \
+            --enable DEVTMPFS --enable TMPFS_POSIX_ACL --enable TMPFS_XATTR \
             --disable ANDROID_PARANOID_NETWORK
           # 最后一次 olddefconfig 会复活 CMA_DEBUG，这里再用 sed 钉死，之后不再 olddefconfig
           make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
@@ -195,50 +173,13 @@ jobs:
               print('[!] patch 02 anchor=%d，跳过（不阻塞）' % s.count(anchor))
           PY
 
-      - name: vendor 兼容补丁（电量/WiFi/CRC）
-        run: |
-          set -e
-          cd kernel
-          # 补丁C: 电量计 custom 结构体补 8 字节 (736->744)
-          python3 - <<'PY'
-          p="drivers/power/mediatek/battery/mtk_battery_internal.h"
-          s=open(p,encoding="utf8",errors="ignore").read()
-          i = s.find("int apsleep_battery_voltage_compensate;")
-          assert i != -1, "apsleep field not found"
-          j = s.find("};", i)
-          assert j != -1, "struct end not found"
-          if "drapix_reserved8" not in s:
-              s = s[:j] + "\tunsigned long long drapix_reserved8; /* +8 bytes: fuel_gauge_custom_data 736->744 */\n" + s[j:]
-              open(p,"w",encoding="utf8").write(s)
-          print("[+] patch C (FG) ok")
-          PY
-
-          # 补丁D: WiFi 符号 connectivity_export_dump_thread_state
-          python3 - <<'PY'
-          h="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.h"
-          c="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.c"
-          hs=open(h,encoding="utf8",errors="ignore").read()
-          if "connectivity_export_dump_thread_state" not in hs:
-              hs=hs.replace("void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);",
-                "void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);\nvoid connectivity_export_dump_thread_state(struct task_struct *tsk);")
-              open(h,"w",encoding="utf8").write(hs)
-          cs=open(c,encoding="utf8",errors="ignore").read()
-          if "connectivity_export_dump_thread_state(struct task_struct" not in cs:
-              cs=cs.replace("EXPORT_SYMBOL(connectivity_export_show_stack);",
-                "EXPORT_SYMBOL(connectivity_export_show_stack);\n\nvoid connectivity_export_dump_thread_state(struct task_struct *tsk)\n{\n\t/* no-op stub for newer vendor wmt_drv */\n}\nEXPORT_SYMBOL(connectivity_export_dump_thread_state);")
-              open(c,"w",encoding="utf8").write(cs)
-          print("[+] patch D (WiFi) ok")
-          PY
 
       - name: 断言（Droidspaces must have）
         run: |
           set -e
           cd kernel
-          MUST="NAMESPACES PID_NS UTS_NS IPC_NS NET_NS USER_NS SYSVIPC POSIX_MQUEUE SECCOMP SECCOMP_FILTER \
-                CGROUPS CGROUP_DEVICE CGROUP_SCHED CGROUP_FREEZER CGROUP_CPUACCT CGROUP_PIDS \
-                MEMCG CFS_BANDWIDTH DEVTMPFS OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR \
-                VETH BRIDGE NF_CONNTRACK IP_NF_IPTABLES IP_NF_FILTER NF_NAT \
-                IP_NF_TARGET_MASQUERADE NETFILTER_XT_MATCH_ADDRTYPE"
+          MUST="NAMESPACES PID_NS UTS_NS IPC_NS SYSVIPC POSIX_MQUEUE SECCOMP SECCOMP_FILTER \
+                CGROUPS CGROUP_DEVICE CGROUP_FREEZER DEVTMPFS OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR"
           BAD=""
           for s in $MUST; do grep -q "^CONFIG_$s=y" out/.config || BAD="$BAD $s"; done
           echo "=== 关键项 ==="
