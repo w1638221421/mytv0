@@ -1,51 +1,29 @@
 #!/usr/bin/env python3
 """
-Resolve vendor includes by *content*, not by guessing.
+Resolve vendor includes by existence, not by guessing.
 
-The GPL kernel drop ships driver sources whose Makefiles do not carry the include
-paths the original Android build system supplied. A blanket -I over whole subtrees
-risks shadowing; instead this script:
+The GPL kernel drop ships driver sources whose Makefiles lack include paths that the
+original Android build system supplied. For every Makefile directory we read the
+#include directives of the sources it builds and, for each name, test candidate
+directories (the directory itself, its include//inc, and up to two parents). The
+first candidate that actually contains the header is added as -I.
 
-  1. indexes every header in the tree by basename,
-  2. reads the #include directives of the sources each Makefile actually builds,
-  3. for any include name that cannot be resolved from the directory itself
-     (or its include//inc/parent dirs) but exists in exactly one place, adds that
-     one directory to the directory's ccflags.
-
-It also appends -Wno-error so that 2018-era vendor code is not failed by warnings
-from a newer toolchain. No driver logic is touched.
+This is exact: a path is added only when the file provably exists there, so no
+unrelated header can be shadowed. -Wno-error is appended so 2018-era vendor code is
+not failed by warnings from a newer toolchain.
 
 Usage: python fix_includes_smart.py <kernel_root>
 """
 import os
 import re
 import sys
-from collections import defaultdict
 
 root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else '.')
-
 INC_RE = re.compile(rb'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.M)
 MARK = 'droidspaces_includes'
+MAX_ANCESTORS = 2
 
-# ---------------------------------------------------------------- index headers
-index = defaultdict(list)
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = [d for d in dirnames if d not in ('.git', 'out')]
-    for fn in filenames:
-        if fn.endswith('.h'):
-            index[fn].append(os.path.relpath(dirpath, root).replace(os.sep, '/'))
-print(f'header index: {len(index)} unique names')
-
-def resolve(name):
-    """Return the single directory holding this header, or None if ambiguous/unknown."""
-    locs = index.get(os.path.basename(name))
-    if not locs or len(locs) != 1:
-        return None
-    return locs[0]
-
-# ---------------------------------------------------------------- scan makefiles
-patched = 0
-visited = 0
+visited = patched = 0
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [d for d in dirnames if d not in ('.git', 'out')]
     if 'Makefile' not in filenames:
@@ -61,15 +39,16 @@ for dirpath, dirnames, filenames in os.walk(root):
         continue
 
     rel = os.path.relpath(dirpath, root).replace(os.sep, '/')
-    local = {rel, rel + '/include', rel + '/inc'}
-    p = rel
-    for _ in range(2):
-        p = os.path.dirname(p).replace(os.sep, '/')
-        if not p or p == '.':
+    candidates = [rel, rel + '/include', rel + '/inc']
+    anc = rel
+    for _ in range(MAX_ANCESTORS):
+        anc = os.path.dirname(anc).replace(os.sep, '/')
+        if not anc or anc == '.':
             break
-        local.add(p)
+        candidates += [anc, anc + '/include', anc + '/inc']
+    candidates = list(dict.fromkeys(candidates))
 
-    needed = set()
+    names = set()
     for fn in filenames:
         if not fn.endswith(('.c', '.h', '.S')):
             continue
@@ -78,16 +57,18 @@ for dirpath, dirnames, filenames in os.walk(root):
         except OSError:
             continue
         for m in INC_RE.finditer(data):
-            name = m.group(1).decode('utf-8', 'replace').strip()
-            if '/' in name.lstrip('./') and not name.startswith('./'):
-                continue                      # subsystem include like linux/xxx.h
-            base = os.path.basename(name)
-            target = resolve(base)
-            if target and target not in local:
-                needed.add(target)
+            n = m.group(1).decode('utf-8', 'replace').strip()
+            n = n[2:] if n.startswith('./') else n
+            if n and not n.startswith('/') and '/' in n or n.endswith('.h'):
+                names.add(os.path.normpath(n))
 
-    if not needed and '-Wno-error' in mk:
-        continue
+    needed = set()
+    for n in names:
+        for c in candidates:
+            if os.path.isfile(os.path.join(root, c, n)):
+                needed.add(c)
+                break
+
     flags = ' '.join(f'-I$(srctree)/{d}' for d in sorted(needed))
     block = ('\n# --- added by Droidspaces build kit (include resolution) ---\n'
              f'{MARK} := {flags} -Wno-error\n'
