@@ -97,6 +97,8 @@ python3 "$WS/tools/add_offsets.py" arch/arm64/kernel/asm-offsets.c || die "probe
 
 step "5) olddefconfig"
 make -j"$(nproc)" olddefconfig 2>&1 | tail -5
+# names in the camera config that this source tree does not ship would abort the build
+python3 "$WS/tools/fix_sensor_lists.py" . || die "sensor list fix failed"
 echo "--- options in effect:"
 grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|SYSVIPC_SYSCTL|NET_NS|USER_NS|MODVERSIONS)=' .config || true
 
@@ -125,7 +127,7 @@ mkdir -p "$WS/artifacts"
 # modern host GCC (>=10) defaults to -fno-common, which breaks the in-tree dtc of 4.4
 python3 "$WS/tools/fix_host_tools.py" . || die "host tool fix failed"
 # vendor drivers whose headers use "./include/..." includes need the matching -I
-python3 "$WS/tools/fix_source_includes.py" . || die "source include fix failed"
+python3 "$WS/tools/fix_includes_smart.py" . || die "include resolution failed"
 set +e
 make -j"$(nproc)" HOSTCFLAGS="-fcommon -O2 -std=gnu89 -w" Image.gz > "$WS/artifacts/build-$MODE.log" 2>&1
 rc=$?
