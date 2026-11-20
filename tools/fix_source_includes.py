@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Build-system repairs for vendor driver directories whose headers include each
-other as "./include/xxx.h" (relative to the driver root) while their Makefile does
-not add the matching -I flag.
+Generic build-system repair for the vendor driver trees.
 
-Nothing here changes driver logic: it only supplies the include path the shipped
-Makefile is missing, and relaxes the tree-wide -Werror for that directory so that a
-2018-era vendor driver still compiles under this toolchain.
+Several Huawei/MTK driver directories include headers that live in the driver root
+or in <driver>/include, while their Makefile supplies no matching -I. Instead of
+patching directories one by one, walk the known vendor roots and make every
+directory that builds objects self-including:
+
+    ccflags-y += -I$(srctree)/<dir> -I$(srctree)/<dir>/include -Wno-error
+
+Extra -I entries are harmless; -Wno-error only keeps 2018-era vendor code from
+failing on warnings produced by a newer toolchain. No driver logic is touched.
 
 Usage: python fix_source_includes.py <kernel_root>
 """
@@ -14,36 +18,37 @@ import os
 import sys
 
 root = sys.argv[1] if len(sys.argv) > 1 else '.'
+ROOTS = ['drivers/devkit', 'security', 'drivers/misc/mediatek/base', 'drivers/huawei']
 
-# dir -> extra flags to append (idempotent)
-PATCHES = {
-    'security/hw_root_scan': [
-        'ccflags-y += -I$(srctree)/security/hw_root_scan',
-        'ccflags-y += -Wno-error',
-    ],
-    'security/check_root': [
-        'ccflags-y += -I$(srctree)/security/check_root',
-        'ccflags-y += -Wno-error',
-    ],
-}
+FLAGS = ['-I$(srctree)/{d}', '-I$(srctree)/{d}/include', '-Wno-error']
+MARK = 'ccflags-y += $(droidspaces_extra_includes)'
+patched = 0
+visited = 0
 
-for rel, lines in PATCHES.items():
-    mk = os.path.join(root, rel, 'Makefile')
-    if not os.path.exists(mk):
-        print(f'{rel}: no Makefile, skip')
+for base in ROOTS:
+    bpath = os.path.join(root, base)
+    if not os.path.isdir(bpath):
         continue
-    text = open(mk, encoding='utf-8', errors='surrogateescape').read()
-    added = []
-    for line in lines:
-        key = line.split('+=', 1)[1].strip()
-        if key in text:
+    for dirpath, dirnames, filenames in os.walk(bpath):
+        if 'Makefile' not in filenames:
             continue
-        text += ('\n' if not text.endswith('\n') else '') + line + '\n'
-        added.append(line)
-    if added:
+        visited += 1
+        rel = os.path.relpath(dirpath, root)
+        mk = os.path.join(dirpath, 'Makefile')
+        try:
+            text = open(mk, encoding='utf-8', errors='surrogateescape').read()
+        except OSError:
+            continue
+        if 'droidspaces_extra_includes' in text:
+            continue
+        # only touch dirs that actually build something
+        if not any(l.strip().startswith(('obj-', 'obj-y', 'obj-m')) for l in text.splitlines()):
+            continue
+        block = ['', '# --- added by Droidspaces build kit: make "./..." includes resolvable ---',
+                 'droidspaces_extra_includes := ' + ' '.join(f.format(d=rel) for f in FLAGS),
+                 'ccflags-y += $(droidspaces_extra_includes)']
+        text += ('\n' if not text.endswith('\n') else '') + '\n'.join(block) + '\n'
         open(mk, 'w', encoding='utf-8', errors='surrogateescape').write(text)
-        print(f'{rel}: added {len(added)} flag(s) -> {" | ".join(added)}')
-    else:
-        print(f'{rel}: already patched')
+        patched += 1
 
-print('source include fixes done')
+print(f'vendor Makefiles scanned: {visited}, patched: {patched}')
