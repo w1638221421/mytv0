@@ -199,10 +199,6 @@ jobs:
         run: |
           set -e
           cd kernel
-          # 补丁B: 跳过符号 CRC 校验（vendor 二进制模块与重编内核 CRC 不一致）
-          sed -i 's/if (!crc)/if (1)/' kernel/module.c
-          grep -q 'if (1)' kernel/module.c && echo "[+] patch B (CRC) ok"
-
           # 补丁C: 电量计 custom 结构体补 8 字节 (736->744)
           python3 - <<'PY'
           p="drivers/power/mediatek/battery/mtk_battery_internal.h"
