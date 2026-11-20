@@ -96,7 +96,13 @@ jobs:
           cd repo/kernel-4.4
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz 2>&1 | tail -30
+          if ! make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > build.log 2>&1; then
+            echo "=== ERROR LINES ==="
+            grep -nE "error:|fatal error|No rule to make|undefined reference|multiple definition|Error [0-9]" build.log | head -40
+            echo "=== TAIL ==="
+            tail -30 build.log
+            exit 1
+          fi
           ls -l arch/arm64/boot/Image.gz
 
       - name: package
