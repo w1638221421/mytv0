@@ -114,7 +114,7 @@ jobs:
           cp kernel/out/Module.symvers artifacts/Module.symvers.target
           cp kernel/out/.config artifacts/config.target
           cp kernel/out/include/generated/asm-offsets.h artifacts/asm-offsets.target.h 2>/dev/null || true
-          cp kernel/include/config/kernel.release artifacts/kernel.release.target
+          cp kernel/out/include/config/kernel.release artifacts/kernel.release.target
           grep -E '^#define DS_' kernel/out/include/generated/asm-offsets.h > artifacts/offsets.target.txt 2>/dev/null || true
           python3 "$GITHUB_WORKSPACE/tools/check_crcs.py" kernel/out/Module.symvers "$GITHUB_WORKSPACE/configs/stock-modcrcs.txt" > artifacts/crc-gate.target.txt 2>&1 || true
           echo "=== CRC gate ==="
