@@ -124,6 +124,8 @@ step "6) build Image.gz"
 mkdir -p "$WS/artifacts"
 # modern host GCC (>=10) defaults to -fno-common, which breaks the in-tree dtc of 4.4
 python3 "$WS/tools/fix_host_tools.py" . || die "host tool fix failed"
+# vendor drivers whose headers use "./include/..." includes need the matching -I
+python3 "$WS/tools/fix_source_includes.py" . || die "source include fix failed"
 set +e
 make -j"$(nproc)" HOSTCFLAGS="-fcommon -O2 -std=gnu89 -w" Image.gz > "$WS/artifacts/build-$MODE.log" 2>&1
 rc=$?
