@@ -156,6 +156,42 @@ jobs:
           PY
 
 
+      - name: 正确补丁（WiFi符号正确签名 + 电量结构体）
+        run: |
+          set -e
+          cd kernel
+          # 补丁D: connectivity_export_dump_thread_state(const char *name) —— 正确签名
+          python3 - <<'PY'
+          h="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.h"
+          c="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.c"
+          hs=open(h,encoding="utf-8",errors="ignore").read()
+          if "connectivity_export_dump_thread_state" not in hs:
+              hs=hs.replace("void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);",
+                "void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);\nvoid connectivity_export_dump_thread_state(const char *name);")
+              open(h,"w",encoding="utf-8").write(hs)
+          cs=open(c,encoding="utf-8",errors="ignore").read()
+          if "connectivity_export_dump_thread_state(const char *name)" not in cs:
+              fn = "void connectivity_export_dump_thread_state(const char *name)\n{\n\tstruct task_struct *p;\n\n\tif (!name || strlen(name) > 255)\n\t\treturn;\n\n\trcu_read_lock();\n\tfor_each_process(p) {\n\t\tif (strncmp(p->comm, name, strlen(name)) == 0) {\n\t\t\tshow_stack(p, NULL);\n\t\t\tbreak;\n\t\t}\n\t}\n\trcu_read_unlock();\n}\nEXPORT_SYMBOL(connectivity_export_dump_thread_state);\n"
+              cs=cs.replace("EXPORT_SYMBOL(connectivity_export_show_stack);",
+                "EXPORT_SYMBOL(connectivity_export_show_stack);\n\n" + fn)
+              open(c,"w",encoding="utf-8").write(cs)
+          print("[+] patch D (correct signature) ok")
+          PY
+
+          # 补丁C: 电量结构体补 8 字节 (736->744)
+          python3 - <<'PY'
+          p="drivers/power/mediatek/battery/mtk_battery_internal.h"
+          s=open(p,encoding="utf8",errors="ignore").read()
+          if "drapix_reserved8" not in s:
+              i = s.find("int apsleep_battery_voltage_compensate;")
+              assert i != -1, "apsleep field not found"
+              j = s.find("};", i)
+              assert j != -1, "struct end not found"
+              s = s[:j] + "\tunsigned long long drapix_reserved8; /* +8 bytes: fuel_gauge_custom_data 736->744 */\n" + s[j:]
+              open(p,"w",encoding="utf8").write(s)
+          print("[+] patch C (FG) ok")
+          PY
+
       - name: 断言（Droidspaces must have）
         run: |
           set -e
