@@ -1,131 +1,13 @@
 name: ds-kernel-v2
 
-# MT6739 / DUA-AL00 / linux 4.4.95  —— Droidspaces 内核（安全版）
-#
-# 复用 l16-droidspaces 已验证能编过的构建配方，但只做"最小 + 布局保持"改动，
-# 目标是让 2018 年的闭源 vendor 模块（wlan_drv_gen2/wmt_drv/bt_drv/gps_drv 等）
-# 在刷入新内核后仍能原样加载，不重演 WiFi/蓝牙/电量异常。
-#
-# 与 l16 的关键差异：
-#   1) 配置增量收到 5 项（SYSVIPC/NAMESPACES/UTS_NS/IPC_NS/PID_NS），显式关 NET_NS/USER_NS
-#   2) 用 move_sysvipc 把 task_struct 里 CONFIG_SYSVIPC 的成员搬到结构体尾部，
-#      保证所有既有字段偏移与 2018 原厂完全一致（预编译 .ko 的硬编码偏移因此仍成立）
-#   3) 不做 FG 电量结构体硬改（field_a=2），不做 CRC 绕过，不改 ANDROID_PARANOID_NETWORK
-
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  baseline:
-    name: baseline (stock config, no patch)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: deps
-        run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
-          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
-          python -V
-
-      - name: toolchain
-        run: |
-          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
-          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
-
-      - name: source + base config
-        run: |
-          set -e
-          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
-          head -5 kernel/Makefile
-          cp configs/stock.config kernel/los16_real.config
-          mkdir -p kernel/out
-          cp configs/stock.config kernel/out/.config
-          echo "base symbols: $(grep -c '^CONFIG_\|^# CONFIG_' kernel/out/.config)"
-
-      - name: configure (baseline: stock, only compile-compat fixes)
-        run: |
-          set -e
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-
-          # 过滤源码树不存在的 imgsensor / LCM（否则 make 报 No rule to make target）
-          D=drivers/misc/mediatek/imgsensor/src/common/v1
-          L=drivers/misc/mediatek/lcm
-          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' out/.config | cut -d'"' -f2)
-          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x" || echo "DROP sensor: $x"; done
-          scripts/config --file out/.config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
-          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' out/.config | cut -d'"' -f2)
-          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || echo "DROP lcm: $x"; done
-          scripts/config --file out/.config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
-
-          # CMA_DEBUG 被 ZONE_MOVABLE_CMA select 强制打开，原厂是 n
-          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
-          scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
-          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
-          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
-          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config || true
-          sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' out/.config || true
-          grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|NET_NS|USER_NS)=' out/.config || true
-
-      - name: layout probes
-        run: |
-          cd kernel
-          python3 "$GITHUB_WORKSPACE/tools/add_offsets.py" arch/arm64/kernel/asm-offsets.c
-
-      - name: source hotfixes (compile-compat only)
-        run: |
-          set -e
-          cd kernel
-          # SCHED_DEBUG=n 时 const_debug => const，MTK 调度代码要写它
-          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
-          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
-          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
-          # 老代码 + 新 GCC
-          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
-          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
-          # dtc yylloc 在 -fcommon 下重复定义
-          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
-            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
-          done
-
-      - name: build
-        run: |
-          set -e
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz 2>&1 | tail -25
-          ls -l out/arch/arm64/boot/Image.gz
-
-      - name: package
-        run: |
-          set -e
-          mkdir -p artifacts
-          cp kernel/out/arch/arm64/boot/Image.gz artifacts/Image.gz.stock
-          cp kernel/out/Module.symvers artifacts/Module.symvers.stock
-          cp kernel/out/.config artifacts/config.stock
-          cp kernel/out/include/generated/asm-offsets.h artifacts/asm-offsets.stock.h 2>/dev/null || true
-          cp kernel/include/config/kernel.release artifacts/kernel.release.stock
-          grep -E '^#define DS_' kernel/out/include/generated/asm-offsets.h > artifacts/offsets.stock.txt 2>/dev/null || true
-          ls -l artifacts/
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ds-baseline
-          path: artifacts/*
-          if-no-files-found: warn
-
   target:
-    name: target (minimal namespace delta + layout-preserving patch)
+    name: target
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
@@ -144,7 +26,7 @@ jobs:
           git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
           "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
 
-      - name: source + base config
+      - name: source and base config
         run: |
           set -e
           git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
@@ -154,14 +36,13 @@ jobs:
           cp configs/stock.config kernel/out/.config
           echo "base symbols: $(grep -c '^CONFIG_\|^# CONFIG_' kernel/out/.config)"
 
-      - name: configure (minimal namespace delta)
+      - name: configure
         run: |
           set -e
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
 
-          # 过滤源码树不存在的 imgsensor / LCM
           D=drivers/misc/mediatek/imgsensor/src/common/v1
           L=drivers/misc/mediatek/lcm
           S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' out/.config | cut -d'"' -f2)
@@ -171,13 +52,9 @@ jobs:
           K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || echo "DROP lcm: $x"; done
           scripts/config --file out/.config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
 
-          # CMA_DEBUG 保持原厂 n
           sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
           scripts/config --file out/.config --disable CMA_DEBUG --disable CMA_DEBUGFS
 
-          # ★ 最小 namespace 增量：只开 4 项 MUST + 它们的最低依赖
-          #   NET_NS/USER_NS 会被 NAMESPACES 默认打开，但它们会改 struct net 布局，
-          #   必须显式关闭，否则网络类闭源模块 CRC 全部失配。
           scripts/config --file out/.config \
             --enable SYSVIPC --enable SYSVIPC_SYSCTL \
             --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS \
@@ -189,18 +66,19 @@ jobs:
           sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config || true
           sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' out/.config || true
 
-          echo "=== namespace options in effect ==="
+          echo "=== namespace options ==="
           grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|SYSVIPC_SYSCTL|NET_NS|USER_NS|MODVERSIONS)=' out/.config || true
-          echo "=== paranoid network (must stay =y) ==="
+          echo "=== paranoid network (must stay y) ==="
           grep -E '^CONFIG_ANDROID_PARANOID_NETWORK=' out/.config || true
 
-      - name: layout-preserving patch (move SYSVIPC members to tail)
+      - name: layout-preserving patch
         run: |
+          set -e
           cd kernel
           python3 "$GITHUB_WORKSPACE/tools/move_sysvipc.py" include/linux/sched.h
           python3 "$GITHUB_WORKSPACE/tools/add_offsets.py" arch/arm64/kernel/asm-offsets.c
 
-      - name: source hotfixes (compile-compat)
+      - name: source hotfixes
         run: |
           set -e
           cd kernel
@@ -213,26 +91,11 @@ jobs:
             [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
 
-      - name: connectivity symbol fix (correct signature, NOT a CRC bypass)
+      - name: connectivity symbol fix
         run: |
           set -e
           cd kernel
-          python3 - <<'PY'
-          h="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.h"
-          c="drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.c"
-          hs=open(h,encoding="utf-8",errors="ignore").read()
-          if "connectivity_export_dump_thread_state" not in hs:
-              hs=hs.replace("void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);",
-                "void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp);\nvoid connectivity_export_dump_thread_state(const char *name);")
-              open(h,"w",encoding="utf-8").write(hs)
-          cs=open(c,encoding="utf-8",errors="ignore").read()
-          if "connectivity_export_dump_thread_state(const char *name)" not in cs:
-              fn = "void connectivity_export_dump_thread_state(const char *name)\n{\n\tstruct task_struct *p;\n\n\tif (!name || strlen(name) > 255)\n\t\treturn;\n\n\trcu_read_lock();\n\tfor_each_process(p) {\n\t\tif (strncmp(p->comm, name, strlen(name)) == 0) {\n\t\t\tshow_stack(p, NULL);\n\t\t\tbreak;\n\t\t}\n\t}\n\trcu_read_unlock();\n}\nEXPORT_SYMBOL(connectivity_export_dump_thread_state);\n"
-              cs=cs.replace("EXPORT_SYMBOL(connectivity_export_show_stack);",
-                "EXPORT_SYMBOL(connectivity_export_show_stack);\n\n" + fn)
-              open(c,"w",encoding="utf-8").write(cs)
-          print("[+] connectivity signature ok")
-          PY
+          python3 "$GITHUB_WORKSPACE/tools/connectivity_fix.py"
 
       - name: build
         run: |
@@ -240,7 +103,7 @@ jobs:
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz 2>&1 | tail -25
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz 2>&1 | tail -30
           ls -l out/arch/arm64/boot/Image.gz
 
       - name: package
@@ -253,9 +116,13 @@ jobs:
           cp kernel/out/include/generated/asm-offsets.h artifacts/asm-offsets.target.h 2>/dev/null || true
           cp kernel/include/config/kernel.release artifacts/kernel.release.target
           grep -E '^#define DS_' kernel/out/include/generated/asm-offsets.h > artifacts/offsets.target.txt 2>/dev/null || true
-          # CRC gate: 与 2018 原厂模块要求的符号 CRC 逐项比对
           python3 "$GITHUB_WORKSPACE/tools/check_crcs.py" kernel/out/Module.symvers "$GITHUB_WORKSPACE/configs/stock-modcrcs.txt" > artifacts/crc-gate.target.txt 2>&1 || true
+          echo "=== CRC gate ==="
           cat artifacts/crc-gate.target.txt
+          echo "=== release ==="
+          cat artifacts/kernel.release.target
+          echo "=== offsets ==="
+          cat artifacts/offsets.target.txt
           ls -l artifacts/
 
       - uses: actions/upload-artifact@v4
