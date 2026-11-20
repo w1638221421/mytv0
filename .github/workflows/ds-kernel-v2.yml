@@ -35,6 +35,17 @@ jobs:
           cp "$GITHUB_WORKSPACE/configs/stock.config" .config
           echo "base symbols: $(grep -c '^CONFIG_\|^# CONFIG_' .config)"
 
+      - name: merge connectivity driver source
+        run: |
+          set -e
+          git clone --depth=1 https://github.com/gemian/cosmo-linux-kernel-4.4 cosmo
+          echo "cosmo connectivity dirs:"
+          ls cosmo/drivers/misc/mediatek/connectivity/
+          rm -rf repo/kernel-4.4/drivers/misc/mediatek/connectivity
+          cp -r cosmo/drivers/misc/mediatek/connectivity repo/kernel-4.4/drivers/misc/mediatek/connectivity
+          echo "merged connectivity:"
+          ls repo/kernel-4.4/drivers/misc/mediatek/connectivity/
+
       - name: configure
         run: |
           set -e
@@ -112,6 +123,25 @@ jobs:
           fi
           ls -l arch/arm64/boot/Image.gz
 
+      - name: build connectivity modules
+        run: |
+          set -e
+          cd repo/kernel-4.4
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc631/bin/aarch64-linux-gnu-"
+          # force the combo drivers to build as modules
+          scripts/config --file .config --module MTK_COMBO --module MTK_COMBO_WIFI --module MTK_COMBO_BT --module MTK_COMBO_GPS 2>/dev/null || true
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" olddefconfig
+          if ! make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" modules > modules.log 2>&1; then
+            echo "=== MODULE ERROR LINES ==="
+            grep -nE "error:|fatal error|No rule to make|undefined reference|multiple definition|Error [0-9]" modules.log | head -40
+            echo "=== TAIL ==="
+            tail -30 modules.log
+            exit 1
+          fi
+          echo "=== built modules ==="
+          find . -name "*.ko" -type f | sort
+
       - name: package
         run: |
           set -e
@@ -122,6 +152,10 @@ jobs:
           cp .config "$GITHUB_WORKSPACE/artifacts/config.target"
           cp include/generated/asm-offsets.h "$GITHUB_WORKSPACE/artifacts/asm-offsets.target.h" 2>/dev/null || true
           cp include/config/kernel.release "$GITHUB_WORKSPACE/artifacts/kernel.release.target"
+          # collect built modules
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/modules"
+          find . -name "*.ko" -type f -exec cp {} "$GITHUB_WORKSPACE/artifacts/modules/" \; 2>/dev/null || true
+          ls -l "$GITHUB_WORKSPACE/artifacts/modules/" || true
           grep -E '^#define DS_' include/generated/asm-offsets.h > "$GITHUB_WORKSPACE/artifacts/offsets.target.txt" 2>/dev/null || true
           python3 "$GITHUB_WORKSPACE/tools/check_crcs.py" Module.symvers "$GITHUB_WORKSPACE/configs/stock-modcrcs.txt" > "$GITHUB_WORKSPACE/artifacts/crc-gate.target.txt" 2>&1 || true
           echo "=== CRC gate ==="
