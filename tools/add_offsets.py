@@ -13,6 +13,13 @@ if MARK in src:
     print('probe already present')
     sys.exit(0)
 
+# struct nsproxy is only forward-declared in sched.h; we need the real definition
+if 'linux/nsproxy.h' not in src:
+    idx = src.rfind('#include')
+    eol = src.index('\n', idx) + 1
+    src = src[:eol] + '#include <linux/nsproxy.h>\n' + src[eol:]
+    print('added #include <linux/nsproxy.h>')
+
 PROBE = '''
 	/* DS_OFFSET_PROBE: layout parity checks, fingerprint of task_struct/nsproxy */
 	DEFINE(DS_TASK_SIZE, sizeof(struct task_struct));
