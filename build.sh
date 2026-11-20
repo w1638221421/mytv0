@@ -75,9 +75,13 @@ cp "$WS/configs/stock.config" .config
 [ -s .config ] || die "stock.config missing/empty"
 
 if [ "$MODE" = "target" ]; then
+  # NET_NS / USER_NS default to y once NAMESPACES is on, but NET_NS changes the
+  # layout of `struct net` and would invalidate the CRC of every networking module
+  # (wlan_drv_gen2, wmt_drv, ...). Containers therefore use --net=host.
   scripts/config --file .config \
     --enable SYSVIPC --enable SYSVIPC_SYSCTL \
-    --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS
+    --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS \
+    --disable NET_NS --disable USER_NS
   echo "--- relocating SYSVIPC members to the tail of struct task_struct"
   python3 "$WS/tools/move_sysvipc.py" include/linux/sched.h || die "layout patch failed"
 else
@@ -91,6 +95,26 @@ step "5) olddefconfig"
 make -j"$(nproc)" olddefconfig 2>&1 | tail -5
 echo "--- options in effect:"
 grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|SYSVIPC_SYSCTL|NET_NS|USER_NS|MODVERSIONS)=' .config || true
+
+echo "--- config delta vs stock (everything kconfig actually changed):"
+python3 - "$WS/configs/stock.config" .config <<'PY'
+import re, sys
+def load(p):
+    d = {}
+    for ln in open(p, encoding='utf-8', errors='replace'):
+        ln = ln.strip()
+        m = re.match(r'^(CONFIG_[A-Z0-9_]+)=(.+)$', ln)
+        if m:
+            d[m.group(1)] = m.group(2); continue
+        m = re.match(r'^# (CONFIG_[A-Z0-9_]+) is not set$', ln)
+        if m:
+            d[m.group(1)] = 'n'
+    return d
+a, b = load(sys.argv[1]), load(sys.argv[2])
+for k in sorted(set(a) | set(b)):
+    if a.get(k) != b.get(k):
+        print(f'  {k}: {a.get(k)} -> {b.get(k)}')
+PY
 
 step "6) build Image.gz"
 set +e
