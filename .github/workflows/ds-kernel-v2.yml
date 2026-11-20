@@ -90,6 +90,12 @@ jobs:
             [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
 
+      - name: fix vendor include paths
+        run: |
+          set -e
+          cd repo/kernel-4.4
+          python3 "$GITHUB_WORKSPACE/tools/fix_includes_smart.py" .
+
       - name: build
         run: |
           set -e
