@@ -178,18 +178,25 @@ jobs:
           print("[+] patch D (correct signature) ok")
           PY
 
-          # 补丁C: 电量结构体补 8 字节 (736->744)
+          # 补丁C: 电量结构体补 2 个 int 字段 (736->744)，字段A=2（反汇编确认）
           python3 - <<'PY'
           p="drivers/power/mediatek/battery/mtk_battery_internal.h"
           s=open(p,encoding="utf8",errors="ignore").read()
-          if "drapix_reserved8" not in s:
+          if "drapix_field_a" not in s:
               i = s.find("int apsleep_battery_voltage_compensate;")
               assert i != -1, "apsleep field not found"
               j = s.find("};", i)
               assert j != -1, "struct end not found"
-              s = s[:j] + "\tunsigned long long drapix_reserved8; /* +8 bytes: fuel_gauge_custom_data 736->744 */\n" + s[j:]
+              s = s[:j] + "\tint drapix_field_a; /* +4 bytes: default 2 */\n\tint drapix_field_b; /* +4 bytes: default 0 */\n" + s[j:]
               open(p,"w",encoding="utf8").write(s)
-          print("[+] patch C (FG) ok")
+          # 初始化字段A=2
+          c="drivers/power/mediatek/battery/mtk_battery.c"
+          s2=open(c,encoding="utf8",errors="ignore").read()
+          if "drapix_field_a = 2" not in s2:
+              s2=s2.replace("fg_cust_data.pl_charger_status = gauge_dev->fg_hw_info.pl_charger_status;",
+                "fg_cust_data.pl_charger_status = gauge_dev->fg_hw_info.pl_charger_status;\n\tfg_cust_data.drapix_field_a = 2;")
+              open(c,"w",encoding="utf8").write(s2)
+          print("[+] patch C (2 fields, field_a=2) ok")
           PY
 
       - name: 断言（Droidspaces must have）
