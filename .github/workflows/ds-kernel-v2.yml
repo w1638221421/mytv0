@@ -1,49 +1,136 @@
-name: phase2-case5
+name: phase3-build
+# Phase 3: BUILD-0..4 controlled builds, SYSVIPC=n / NET_NS=n / USER_NS=n / MEMCG=n, MODVERSIONS=y.
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  resolve:
+  build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
+
       - name: deps
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc make bison flex bc
-      - name: clone
-        run: git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
-      - name: cases
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: clone source (fixed commit ref)
+        run: |
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          cd kernel
+          echo "commit: $(git rev-parse HEAD)"
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' Makefile
+          echo "+" > .scmversion
+
+      - name: source fixes (identical for all builds) + save diff
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts-raw"
+          cd kernel
+          # --- identical build-enablement fixes (no struct/symbol change) ---
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+          # --- CMA_DEBUG parity (baseline-verified config generation processing) ---
+          # ZONE_MOVABLE_CMA selects CMA_DEBUG in this tree; production config has CMA_DEBUG=n.
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          # --- vendor include paths ---
+          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
+          # --- save the source-fix diff (identical for all builds) ---
+          git diff > "$GITHUB_WORKSPACE/artifacts-raw/source-fixes.diff" 2>/dev/null || true
+          git status --short | head -40
+
+      - name: build BUILD-0..4
         run: |
           set -e
-          mkdir -p artifacts
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts-raw"
           cd kernel
           export ARCH=arm64
-          run_case() {
-            local CASE="$1"; shift
-            cp ../configs/stock.config .config
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          export HOSTCFLAGS="-fcommon"
+
+          # drop imgsensor/LCM names not present in this tree (build-enablement, identical for all builds)
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' ../configs/stock.config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x" || echo "DROP sensor: $x"; done
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' ../configs/stock.config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || echo "DROP lcm: $x"; done
+
+          build_one() {
+            local B="$1"; shift
+            echo "########## BUILD-$B ##########"
+            mkdir -p "out$B"
+            cp ../configs/stock.config "out$B/.config"
+            # apply sensor/LCM filtering (identical)
+            scripts/config --file "out$B/.config" --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+            scripts/config --file "out$B/.config" --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+            # apply case-specific options
             while [ $# -gt 0 ]; do
               local k="$1"; local v="$2"; shift 2
-              if [ "$v" = "y" ]; then scripts/config --file .config --enable "$k";
-              elif [ "$v" = "n" ]; then scripts/config --file .config --disable "$k"; fi
+              if [ "$v" = "y" ]; then scripts/config --file "out$B/.config" --enable "$k";
+              elif [ "$v" = "n" ]; then scripts/config --file "out$B/.config" --disable "$k"; fi
             done
-            make ARCH=arm64 olddefconfig > "../artifacts/$CASE.log" 2>&1 || { echo "FATAL $CASE"; tail -20 "../artifacts/$CASE.log"; exit 1; }
-            cp .config "../artifacts/$CASE.config"
-            echo "case $CASE done"
+            # common invariants for all builds
+            scripts/config --file "out$B/.config" --disable SYSVIPC --disable SYSVIPC_SYSCTL \
+              --disable NET_NS --disable USER_NS --disable MEMCG
+            # olddefconfig
+            make O="out$B" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig > "../artifacts-raw/BUILD-$B.config.log" 2>&1
+            # pin CMA_DEBUG/DEBUGFS back to n (baseline parity)
+            sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' "out$B/.config" || true
+            sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' "out$B/.config" || true
+            # full build
+            if ! make O="out$B" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "../artifacts-raw/BUILD-$B.build.log" 2>&1; then
+              echo "=== BUILD-$B ERROR LINES ==="
+              grep -nE "error:|fatal error|No rule to make|undefined reference|multiple definition|Error [0-9]" "../artifacts-raw/BUILD-$B.build.log" | head -40
+              echo "=== TAIL ==="; tail -30 "../artifacts-raw/BUILD-$B.build.log"
+              exit 1
+            fi
+            # collect
+            cp "out$B/Module.symvers" "../artifacts-raw/Module.symvers.BUILD-$B"
+            cp "out$B/.config" "../artifacts-raw/config.BUILD-$B"
+            cp "out$B/include/config/kernel.release" "../artifacts-raw/kernel.release.BUILD-$B"
+            cp "out$B/arch/arm64/boot/Image.gz" "../artifacts-raw/Image.gz.BUILD-$B"
+            echo "BUILD-$B done: $(cat out$B/include/config/kernel.release) symvers=$(grep -c '^0x' out$B/Module.symvers) img=$(stat -c%s out$B/arch/arm64/boot/Image.gz)"
           }
-          # CASE-5: IPC_NS via POSIX_MQUEUE (SYSVIPC stays n) -- ABI-safe route test
-          run_case CASE-5 NAMESPACES y UTS_NS y PID_NS y IPC_NS y POSIX_MQUEUE y SYSVIPC n NET_NS n USER_NS n
-          # CASE-6: recommended full container config (SYSVIPC=n), verify all namespaces on, NET_NS/USER_NS off
-          run_case CASE-6 NAMESPACES y UTS_NS y PID_NS y IPC_NS y POSIX_MQUEUE y SYSVIPC n NET_NS n USER_NS n SECCOMP y SECCOMP_FILTER y CGROUPS y CGROUP_FREEZER y DEVTMPFS y TMPFS_POSIX_ACL y TMPFS_XATTR y OVERLAY_FS y
-      - name: summarize
+
+          # BUILD-0: pure stock baseline
+          build_one 0
+          # BUILD-1: Mount/UTS/PID namespaces only (NET_NS/USER_NS/SYSVIPC/POSIX_MQUEUE = n)
+          build_one 1 NAMESPACES y UTS_NS y PID_NS y POSIX_MQUEUE n
+          # BUILD-2: + ABI-safe IPC namespace (POSIX_MQUEUE + IPC_NS, SYSVIPC=n)
+          build_one 2 NAMESPACES y UTS_NS y PID_NS y POSIX_MQUEUE y IPC_NS y
+          # BUILD-3: minimal DroidSpaces candidate (BUILD-2; container opts already stock-y, none added)
+          build_one 3 NAMESPACES y UTS_NS y PID_NS y POSIX_MQUEUE y IPC_NS y
+          # BUILD-4: BUILD-3 + OverlayFS=y
+          build_one 4 NAMESPACES y UTS_NS y PID_NS y POSIX_MQUEUE y IPC_NS y OVERLAY_FS y
+
+          ls -l "../artifacts-raw/"
+
+      - name: per-build config verification summary
         run: |
           cd kernel
           python3 - <<'PY'
-          import re
-          SYMS=["SYSVIPC","SYSVIPC_SYSCTL","NAMESPACES","UTS_NS","IPC_NS","PID_NS","NET_NS","USER_NS",
-                "POSIX_MQUEUE","SECCOMP","SECCOMP_FILTER","CGROUPS","CGROUP_FREEZER","DEVTMPFS",
-                "TMPFS_POSIX_ACL","TMPFS_XATTR","OVERLAY_FS","CGROUP_DEVICE","CGROUP_PIDS"]
+          import re, os
+          SYMS=["SYSVIPC","SYSVIPC_SYSCTL","POSIX_MQUEUE","POSIX_MQUEUE_SYSCTL","NAMESPACES","UTS_NS","IPC_NS",
+                "PID_NS","NET_NS","USER_NS","CGROUPS","CGROUP_FREEZER","CGROUP_CPUACCT","CGROUP_SCHED","CGROUP_PIDS",
+                "CGROUP_DEVICE","MEMCG","BLK_CGROUP","SECCOMP","SECCOMP_FILTER","OVERLAY_FS","TMPFS","TMPFS_POSIX_ACL",
+                "TMPFS_XATTR","DEVTMPFS","DEVTMPFS_MOUNT","PROC_FS","SYSFS","CMA","CMA_DEBUG","CMA_DEBUGFS",
+                "ZONE_MOVABLE_CMA","MODVERSIONS","ANDROID_PARANOID_NETWORK","LOCALVERSION"]
           def load(p):
               d={}
               for ln in open(p,encoding='utf-8',errors='replace'):
@@ -53,23 +140,29 @@ jobs:
                   m=re.match(r'^# (CONFIG_[A-Z0-9_]+) is not set$',ln)
                   if m: d[m.group(1)]='n'
               return d
-          for c in ["CASE-5","CASE-6"]:
-              d=load("../artifacts/%s.config"%c)
-              print("== "+c)
-              for s in SYMS:
-                  print("  %-22s %s" % (s, d.get("CONFIG_"+s)))
-          # diff CASE-6 vs stock
-          stock=load("../configs/stock.config")
-          d6=load("../artifacts/CASE-6.config")
-          ch=[(k,stock.get(k),d6.get(k)) for k in sorted(set(stock)|set(d6)) if stock.get(k)!=d6.get(k)]
-          open("../artifacts/diff-CASE6-vs-stock.txt","w").write("changed: %d\n"%len(ch)+"\n".join("  %s: %s -> %s"%(k,a,b) for k,a,b in ch))
-          print("== CASE-6 changed vs stock: %d"%len(ch))
-          for k,a,b in ch: print("  %s: %s -> %s"%(k,a,b))
+          out=[]
+          for B in range(5):
+              d=load("../artifacts-raw/config.BUILD-%d"%B)
+              out.append("=== BUILD-%d ==="%B)
+              for s in SYMS: out.append("  %-24s %s"%(s, d.get("CONFIG_"+s)))
+              out.append("  kernel.release: " + open("../artifacts-raw/kernel.release.BUILD-%d"%B).read().strip())
+          txt="\n".join(out)
+          open("../artifacts-raw/config-verification.txt","w").write(txt+"\n")
+          print(txt)
           PY
-          ls -l ../artifacts/
+
+      - name: crc gate per build (quick)
+        run: |
+          cd kernel
+          for B in 0 1 2 3 4; do
+            echo "=== BUILD-$B CRC gate ==="
+            python3 "$GITHUB_WORKSPACE/tools/check_crcs.py" "../artifacts-raw/Module.symvers.BUILD-$B" "$GITHUB_WORKSPACE/configs/stock-modcrcs.txt" \
+              | tee "../artifacts-raw/crc-gate.BUILD-$B.txt" || true
+          done
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase2-case5
-          path: artifacts/*
+          name: phase3-build
+          path: artifacts-raw/*
           if-no-files-found: warn
