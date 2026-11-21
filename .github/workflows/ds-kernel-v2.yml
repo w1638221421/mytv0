@@ -1,13 +1,13 @@
-name: phase4-route3
+name: phase4-sigrec
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  build3:
+  sigrec:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -20,57 +20,148 @@ jobs:
       - name: toolchain
         run: |
           git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
 
-      - name: clone sources
+      - name: clone + prepare (headers only, no full build)
         run: |
           set -e
-          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel3
-          cp -r kernel3 kernelref
-          mkdir -p artifacts
-          git -C kernel3 rev-parse HEAD > artifacts/commit.txt
-          cat artifacts/commit.txt
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          echo "+" > .scmversion
+          cp "$GITHUB_WORKSPACE/configs/stock.config" .config
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' .config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x"; done
+          scripts/config --file .config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' .config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x"; done
+          scripts/config --file .config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          make ARCH=arm64 olddefconfig
+          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          make ARCH=arm64 olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
+          ls include/generated/autoconf.h
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" prepare > prepare.log 2>&1 || { tail -20 prepare.log; exit 1; }
+          echo "prepare ok"
 
-      - name: route-3 patch
+      - name: build genksyms + one adapter object (to capture exact cflags)
         run: |
           set -e
-          cd kernel3
-          python3 "$GITHUB_WORKSPACE/tools/route3_patch.py" .
-          cd "$GITHUB_WORKSPACE"
-          git -C kernel3 diff > artifacts/route3.patch || true
-          echo "--- patch ---"
-          cat artifacts/route3.patch
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" scripts > scripts.log 2>&1 || { tail -20 scripts.log; exit 1; }
+          ls -l scripts/genksyms/genksyms
+          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" \
+            drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.o > adapt.log 2>&1 || { tail -30 adapt.log; exit 1; }
+          ls -l drivers/misc/mediatek/connectivity/common/.connectivity_build_in_adapter.o.cmd
+          cp drivers/misc/mediatek/connectivity/common/.connectivity_build_in_adapter.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
 
-      - name: build helper
-        run: |
-          cp "$GITHUB_WORKSPACE/tools/buildone.sh" "$GITHUB_WORKSPACE/buildone.sh"
-          chmod +x "$GITHUB_WORKSPACE/buildone.sh"
-
-      - name: BUILD-3 route3
-        run: |
-          set -e
-          if ! bash "$GITHUB_WORKSPACE/buildone.sh" "$GITHUB_WORKSPACE/kernel3" BUILD-3 route3; then
-            echo "=== ERROR LINES ==="
-            grep -nE "error:|fatal error|undefined reference|No rule to make|multiple definition|Error [0-9]" "$GITHUB_WORKSPACE/BUILD-3.log" | head -40 || true
-            echo "=== TAIL ==="
-            tail -30 "$GITHUB_WORKSPACE/BUILD-3.log" || true
-            mkdir -p "$GITHUB_WORKSPACE/artifacts/BUILD-3"
-            cp "$GITHUB_WORKSPACE/BUILD-3.log" "$GITHUB_WORKSPACE/artifacts/BUILD-3/build.log" || true
-            exit 1
-          fi
-
-      - name: BUILD-0 reference
+      - name: recover the 5 signatures via batched genksyms CRC search
         run: |
           set -e
-          bash "$GITHUB_WORKSPACE/buildone.sh" "$GITHUB_WORKSPACE/kernelref" BUILD-0 stock
+          cd kernel
+          python3 "$GITHUB_WORKSPACE/tools/gen_candidates.py" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
+          wc -l "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
+          python3 - "$GITHUB_WORKSPACE" <<'PY'
+          import re, subprocess, sys, os, shlex
 
-      - name: gate
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          python3 "$GITHUB_WORKSPACE/tools/gate.py"
+          ws = sys.argv[1]
+          cmd = open(os.path.join(ws, 'adapt.cmd')).read()
+
+          # The .cmd file contains:  cmd_<path> := <full gcc command line>
+          m = re.search(r':=\s*(.+)$', cmd, re.S)
+          if not m:
+              sys.exit('cannot parse .cmd')
+          full = m.group(1).replace('\\\n', ' ')
+          # split into argv, drop -o <obj>, -c, the source file and -Wp,-MD,...
+          toks = shlex.split(full)
+          keep = []
+          skip_next = False
+          for i, t in enumerate(toks):
+              if skip_next:
+                  skip_next = False
+                  continue
+              if t in ('-o', '-c'):
+                  if t == '-o':
+                      skip_next = True
+                  continue
+              if t.startswith('-Wp,-MD,') or t.startswith('-Wp,-MMD,'):
+                  continue
+              if t.endswith('.c'):
+                  continue
+              keep.append(t)
+          # first token is the compiler
+          cc = keep[0]
+          cflags = keep[1:]
+          print('cc =', cc)
+          print('cflags tokens =', len(cflags))
+
+          src = os.path.join(ws, 'cand.c')
+          i_out = os.path.join(ws, 'cand.i')
+          r = subprocess.run([cc] + cflags + ['-E', '-o', i_out, src],
+                             cwd='.', capture_output=True, text=True)
+          if r.returncode != 0:
+              print('--- preprocess stderr (head) ---')
+              print('\n'.join(r.stderr.splitlines()[:40]))
+              sys.exit('preprocess failed')
+
+          gk = './scripts/genksyms/genksyms'
+          with open(i_out, 'rb') as f:
+              r2 = subprocess.run([gk], stdin=f, capture_output=True)
+          print('genksyms rc =', r2.returncode)
+          err = r2.stderr.decode('utf-8', 'replace')
+          if err.strip():
+              print('--- genksyms stderr (head) ---')
+              print('\n'.join(err.splitlines()[:20]))
+          ver = r2.stdout.decode('utf-8', 'replace')
+          open(os.path.join(ws, 'cand.ver'), 'w').write(ver)
+
+          crc = {}
+          for line in ver.splitlines():
+              m2 = re.match(r'\s*__crc_(\S+)\s*=\s*0x([0-9a-fA-F]+)', line)
+              if m2:
+                  crc[m2.group(1)] = int(m2.group(2), 16) & 0xFFFFFFFF
+          print('candidate CRCs produced:', len(crc))
+
+          # map candidate -> (tag, expect, signature)
+          hits = {}
+          for line in open(os.path.join(ws, 'cand.map')):
+              name, tag, expect, sig = line.rstrip('\n').split('\t')
+              got = crc.get(name)
+              if got is None:
+                  continue
+              if got == int(expect, 16):
+                  hits.setdefault(tag, []).append((sig, got))
+          print('\n=== MATCHES ===')
+          for tag in ('show_stack', 'tracing_record_cmdline', 'mmc_io_rw_direct', 'dump_thread_state', 'btif_dbg_ctrl'):
+              h = hits.get(tag, [])
+              if h:
+                  for sig, got in h:
+                      print('  %-24s %08x  %s' % (tag, got, sig))
+              else:
+                  print('  %-24s NO MATCH' % tag)
+          open(os.path.join(ws, 'sig-hits.txt'), 'w').write(
+              '\n'.join('%s\t%08x\t%s' % (tag, got, sig)
+                        for tag in hits for sig, got in hits[tag]) + '\n')
+          PY
+          cat "$GITHUB_WORKSPACE/sig-hits.txt" 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase4-route3
-          path: artifacts/**
+          name: phase4-sigrec
+          path: |
+            cand.map
+            cand.ver
+            sig-hits.txt
+            adapt.cmd
           if-no-files-found: warn
