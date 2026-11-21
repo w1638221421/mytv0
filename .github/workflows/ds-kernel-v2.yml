@@ -40,9 +40,9 @@ jobs:
           set -e
           mkdir -p artifacts
           while IFS=$'\t' read -r name va; do
-            echo "=============== $name (va $va) ===============" | tee -a artifacts/disasm.txt
+            echo "=============== $name (va 0x$va) ===============" | tee -a artifacts/disasm.txt
             aarch64-linux-gnu-objdump -D -b binary -m aarch64 \
-              --adjust-vma=$va /tmp/sl/$name.bin >> artifacts/disasm.txt
+              --adjust-vma=0x$va /tmp/sl/$name.bin >> artifacts/disasm.txt
           done < /tmp/sl/meta.txt
           echo "--- summary of first 24 instructions per symbol ---" > artifacts/disasm-head.txt
           awk '/^===============/{p=1;c=0} p&&c<26{print;c++}' artifacts/disasm.txt >> artifacts/disasm-head.txt
