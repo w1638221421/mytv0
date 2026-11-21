@@ -1,14 +1,14 @@
-name: phase4-sigrec2
+name: phase5-tokens
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  sigrec:
-    name: sigrec
+  tokens:
+    name: tokens
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +22,7 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
 
-      - name: clone + prepare
+      - name: clone + stock config
         run: |
           set -e
           git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
@@ -47,104 +47,91 @@ jobs:
           sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
           sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
           sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" prepare > prepare.log 2>&1 || { tail -30 prepare.log; exit 1; }
-          ls -l include/generated/autoconf.h
-          echo "prepare ok"
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
 
-      - name: genksyms + reference object (capture exact cflags)
+      - name: full build (produces every .cmd and Module.symvers)
         run: |
           set -e
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" scripts > scripts.log 2>&1 || { tail -30 scripts.log; exit 1; }
-          ls -l scripts/genksyms/genksyms
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" init/main.o > ref.log 2>&1 || { tail -40 ref.log; exit 1; }
-          ls -la init/.main.o.cmd
-          cp init/.main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
-          head -c 400 "$GITHUB_WORKSPACE/adapt.cmd"
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "$GITHUB_WORKSPACE/build.log" 2>&1 || {
+            grep -nE "error:|fatal error|undefined reference|No rule to make|Error [0-9]" "$GITHUB_WORKSPACE/build.log" | head -20
+            tail -30 "$GITHUB_WORKSPACE/build.log"; exit 1; }
+          ls -l arch/arm64/boot/Image.gz Module.symvers
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/Module.symvers.stock"
 
-      - name: probe pipeline (variants + genksyms -D token dump)
+      - name: dump tokens for the REAL adapter source
         run: |
           set -e
           cd kernel
-          for mode in def_real decl_real def_dummy decl_dummy; do
-            python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$mode" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
-            python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
-            cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-$mode.txt"
-            echo "===== mode $mode ====="
-            cat "$GITHUB_WORKSPACE/allcrc-$mode.txt"
-          done
+          A=drivers/misc/mediatek/connectivity/common
+          ls -l "$A/.connectivity_build_in_adapter.o.cmd"
+          cp "$A/.connectivity_build_in_adapter.o.cmd" "$GITHUB_WORKSPACE/adapt.cmd"
+          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" "$A/connectivity_build_in_adapter.c" "$GITHUB_WORKSPACE/adapt.cmd"
 
-          # exact source text with parameter names, as the real vendor .c has it
-          cat > "$GITHUB_WORKSPACE/cand.c" <<'EOF'
-          #include <linux/kernel.h>
-          #include <linux/module.h>
-          #include <linux/cdev.h>
-          int cdev_add(struct cdev *p, dev_t dev, unsigned count) { }
-          EXPORT_SYMBOL(cdev_add);
-          void cdev_del(struct cdev *p) { }
-          EXPORT_SYMBOL(cdev_del);
-          EOF
-          cat > "$GITHUB_WORKSPACE/cand.map" <<'EOF'
-          cdev_add	probe	1d092a8a	-	int | struct cdev * p | dev_t dev | unsigned count
-          cdev_del	probe	020f71e8	-	void | struct cdev * p
-          EOF
-          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
-          cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-pnames.txt"
-          echo "===== mode pnames ====="
-          cat "$GITHUB_WORKSPACE/allcrc-pnames.txt"
-
-      - name: HARNESS VALIDATION - run genksyms over the real fs/char_dev.c
+      - name: dump tokens for a probe file (type expansions)
         run: |
           set -e
           cd kernel
-          # if the harness is faithful it must reproduce the CRCs the real build
-          # produced for char_dev.c: cdev_init=ce233b16 cdev_add=1d092a8a
-          #                            cdev_del=020f71e8 (and cdev_alloc)
-          cp fs/char_dev.c "$GITHUB_WORKSPACE/cand.c"
-          : > "$GITHUB_WORKSPACE/cand.map"
-          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE" || true
-          cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-realchardev.txt" || true
-          echo "===== real char_dev.c CRCs ====="
-          grep -E 'cdev' "$GITHUB_WORKSPACE/allcrc-realchardev.txt" || true
-
-      - name: dump genksyms token streams for the MTK baseline signatures
-        run: |
-          set -e
-          cd kernel
-          cat > "$GITHUB_WORKSPACE/cand.c" <<'EOF'
+          cat > "$GITHUB_WORKSPACE/probe_decl.c" <<'EOF'
           #include <linux/kernel.h>
           #include <linux/module.h>
           #include <linux/sched.h>
           #include <linux/mmc/card.h>
-          void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp) { }
-          EXPORT_SYMBOL(connectivity_export_show_stack);
-          void connectivity_export_tracing_record_cmdline(struct task_struct *tsk) { }
-          EXPORT_SYMBOL(connectivity_export_tracing_record_cmdline);
-          int connectivity_export_mmc_io_rw_direct(struct mmc_card *card, int write, unsigned fn, unsigned addr, u8 in, u8 *out) { }
-          EXPORT_SYMBOL(connectivity_export_mmc_io_rw_direct);
+          void t01(struct task_struct *a) { }
+          EXPORT_SYMBOL(t01);
+          void t02(unsigned long *a) { }
+          EXPORT_SYMBOL(t02);
+          void t03(unsigned long a) { }
+          EXPORT_SYMBOL(t03);
+          void t04(int a) { }
+          EXPORT_SYMBOL(t04);
+          void t05(unsigned int a) { }
+          EXPORT_SYMBOL(t05);
+          void t06(unsigned a) { }
+          EXPORT_SYMBOL(t06);
+          void t07(char *a) { }
+          EXPORT_SYMBOL(t07);
+          void t08(const char *a) { }
+          EXPORT_SYMBOL(t08);
+          void t09(void *a) { }
+          EXPORT_SYMBOL(t09);
+          void t10(struct mmc_card *a) { }
+          EXPORT_SYMBOL(t10);
+          void t11(unsigned char a) { }
+          EXPORT_SYMBOL(t11);
+          void t12(bool a) { }
+          EXPORT_SYMBOL(t12);
+          void t13(int *a) { }
+          EXPORT_SYMBOL(t13);
+          void t14(unsigned int *a) { }
+          EXPORT_SYMBOL(t14);
+          void t15(unsigned char *a) { }
+          EXPORT_SYMBOL(t15);
+          void t16(u8 a) { }
+          EXPORT_SYMBOL(t16);
+          void t17(u8 *a) { }
+          EXPORT_SYMBOL(t17);
+          void t18(unsigned long a, unsigned long b) { }
+          EXPORT_SYMBOL(t18);
           EOF
-          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/defs.log" 2>&1 || true
-          head -c 4000 "$GITHUB_WORKSPACE/defs.log"
-
-      - name: recover signatures (batched genksyms CRC search)
-        run: |
-          set -e
-          cd kernel
-          python3 "$GITHUB_WORKSPACE/tools/gen_candidates.py" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
-          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
-          cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-search.txt"
+          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/probe_decl.c" "$GITHUB_WORKSPACE/adapt.cmd"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase4-sigrec2
+          name: phase5-tokens
           path: |
-            cand.map
-            sig-hits.txt
+            artifacts/Module.symvers.stock
             adapt.cmd
-            allcrc-*.txt
-            defs.log
-            defs-dump.txt
+            defs-*.txt
+            ver-*.txt
           if-no-files-found: warn
