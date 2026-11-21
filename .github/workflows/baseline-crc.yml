@@ -1,0 +1,148 @@
+name: baseline-crc
+# DRA-AL00 基线 CRC 数值验证：2018-04-10 GPL 源码 + 原厂 config（SYSVIPC=n，不叠加 DroidSpaces）
+# 目标：复现 2018-08 量产内核的 Module.symvers CRC，比对 339 个原厂模块 __versions。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    name: baseline
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          python -V
+
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
+
+      - name: source and base config
+        run: |
+          set -e
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' kernel/Makefile
+          echo "+" > kernel/.scmversion
+          cp configs/stock.config kernel/.config
+          echo "base symbols: $(grep -c '^CONFIG_\|^# CONFIG_' kernel/.config)"
+
+      - name: configure (stock baseline, no SYSVIPC/namespace changes)
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' .config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x" || echo "DROP sensor: $x"; done
+          scripts/config --file .config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' .config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x" || echo "DROP lcm: $x"; done
+          scripts/config --file .config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
+          sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' .config || true
+
+          echo "=== baseline ABI-critical options (must stay at stock values) ==="
+          grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|SYSVIPC_SYSCTL|NET_NS|USER_NS|ANDROID_PARANOID_NETWORK|MODVERSIONS|MODULE_UNLOAD|TRACEPOINTS|MUTEX_SPIN_ON_OWNER)=' .config || true
+
+          echo "=== config delta vs stock ==="
+          python3 - "$GITHUB_WORKSPACE/configs/stock.config" .config <<'PY'
+          import re, sys
+          def load(p):
+              d = {}
+              for ln in open(p, encoding='utf-8', errors='replace'):
+                  ln = ln.strip()
+                  m = re.match(r'^(CONFIG_[A-Z0-9_]+)=(.+)$', ln)
+                  if m:
+                      d[m.group(1)] = m.group(2); continue
+                  m = re.match(r'^# (CONFIG_[A-Z0-9_]+) is not set$', ln)
+                  if m:
+                      d[m.group(1)] = 'n'
+              return d
+          s, n = load(sys.argv[1]), load(sys.argv[2])
+          ch = [(k, s.get(k), n.get(k)) for k in sorted(set(s) | set(n)) if s.get(k) != n.get(k)]
+          print("changed symbols: %d" % len(ch))
+          for k, a, b in ch:
+              print("  %s: stock=%s new=%s" % (k, a, b))
+          PY
+
+      - name: source hotfixes (build enablement only, no ABI change)
+        run: |
+          set -e
+          cd kernel
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+
+      - name: fix vendor include paths
+        run: |
+          set -e
+          cd kernel
+          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
+
+      - name: build Image.gz (generates Module.symvers)
+        run: |
+          set -e
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          if ! make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > build.log 2>&1; then
+            echo "=== ERROR LINES ==="
+            grep -nE "error:|fatal error|No rule to make|undefined reference|multiple definition|Error [0-9]" build.log | head -40
+            echo "=== TAIL ==="
+            tail -30 build.log
+            exit 1
+          fi
+          ls -l arch/arm64/boot/Image.gz
+          echo "--- Module.symvers exported symbol count: $(grep -c '^0x' Module.symvers)"
+
+      - name: CRC gate vs stock vendor modules
+        run: |
+          set -e
+          cd kernel
+          echo "--- kernel.release: $(cat include/config/kernel.release)"
+          python3 "$GITHUB_WORKSPACE/tools/check_crcs.py" Module.symvers "$GITHUB_WORKSPACE/configs/stock-modcrcs.txt" \
+            | tee "$GITHUB_WORKSPACE/artifacts/crc-gate.stock.txt" || true
+
+      - name: package
+        run: |
+          set -e
+          cd kernel
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/artifacts/Image.gz.stock"
+          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/Module.symvers.stock"
+          cp .config "$GITHUB_WORKSPACE/artifacts/config.stock"
+          cp include/config/kernel.release "$GITHUB_WORKSPACE/artifacts/kernel.release.stock"
+          { echo "device: DRA-AL00 / DURA64 / MT6739 / 4.4.95"; echo "source: paperluigis/android-huawei-dura-kernel@og"; echo "config: stock (SYSVIPC=n)"; echo "commit: $(git rev-parse HEAD)"; echo "time: $(date -u +%FT%TZ)"; } > "$GITHUB_WORKSPACE/artifacts/build-info.txt"
+          cat include/config/kernel.release
+          ls -l "$GITHUB_WORKSPACE/artifacts/"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: baseline-crc
+          path: artifacts/*
+          if-no-files-found: warn
