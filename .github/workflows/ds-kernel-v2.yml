@@ -95,6 +95,20 @@ jobs:
           echo "===== mode pnames ====="
           cat "$GITHUB_WORKSPACE/allcrc-pnames.txt"
 
+      - name: HARNESS VALIDATION - run genksyms over the real fs/char_dev.c
+        run: |
+          set -e
+          cd kernel
+          # if the harness is faithful it must reproduce the CRCs the real build
+          # produced for char_dev.c: cdev_init=ce233b16 cdev_add=1d092a8a
+          #                            cdev_del=020f71e8 (and cdev_alloc)
+          cp fs/char_dev.c "$GITHUB_WORKSPACE/cand.c"
+          : > "$GITHUB_WORKSPACE/cand.map"
+          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE" || true
+          cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-realchardev.txt" || true
+          echo "===== real char_dev.c CRCs ====="
+          grep -E 'cdev' "$GITHUB_WORKSPACE/allcrc-realchardev.txt" || true
+
       - name: dump genksyms token streams for the MTK baseline signatures
         run: |
           set -e
