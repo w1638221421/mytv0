@@ -1,125 +1,56 @@
-name: phase6-tokens2
+name: phase7-disasm
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  tokens2:
-    name: tokens2
+  disasm:
+    name: disasm
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: deps
+      - name: binutils for aarch64
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
-          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-objdump --version | head -1
 
-      - name: toolchain
-        run: |
-          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
-
-      - name: clone + stock config
+      - name: decode slices from slices.txt
         run: |
           set -e
-          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          echo "+" > .scmversion
-          cp "$GITHUB_WORKSPACE/configs/stock.config" .config
-          D=drivers/misc/mediatek/imgsensor/src/common/v1
-          L=drivers/misc/mediatek/lcm
-          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' .config | cut -d'"' -f2)
-          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x"; done
-          scripts/config --file .config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
-          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' .config | cut -d'"' -f2)
-          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x"; done
-          scripts/config --file .config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
-          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
-          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
-          make ARCH=arm64 olddefconfig
-          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
-          make ARCH=arm64 olddefconfig
-          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
-          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
-          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
-          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
-          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
-          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
-          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
-            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
-          done
-          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
-
-      - name: full build
-        run: |
-          set -e
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "$GITHUB_WORKSPACE/build.log" 2>&1 || {
-            grep -nE "error:|fatal error|undefined reference|Error [0-9]" "$GITHUB_WORKSPACE/build.log" | head -20
-            tail -30 "$GITHUB_WORKSPACE/build.log"; exit 1; }
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/Module.symvers.stock"
-          ls -l drivers/misc/mediatek/btif/common/.mtk_btif_exp.o.cmd
-
-      - name: dump btif export file tokens
-        run: |
-          set -e
-          cd kernel
-          cp drivers/misc/mediatek/btif/common/.mtk_btif_exp.o.cmd "$GITHUB_WORKSPACE/btif.cmd"
-          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" \
-            drivers/misc/mediatek/btif/common/mtk_btif_exp.c "$GITHUB_WORKSPACE/btif.cmd" || true
-
-      - name: dump type-expansion probe (40 types)
-        run: |
-          set -e
-          cd kernel
           python3 - <<'PY'
-          types = [
-            'int', 'unsigned int', 'unsigned', 'unsigned long', 'long', 'char',
-            'char *', 'const char *', 'void *', 'u8', 'u8 *', 'unsigned char',
-            'unsigned char *', 'bool', 'short', 'unsigned short', 'int *',
-            'unsigned int *', 'unsigned long *', 'struct task_struct *',
-            'struct mmc_card *', 'unsigned long long', 'u32', 'u64', 'size_t',
-            'char **', 'void **', 'struct pt_regs *', 'const void *', 'long long',
-            's32', 'struct sdio_func *', 'const unsigned char *', 'u16', 'u16 *',
-            'unsigned short *', 'const struct task_struct *', 'struct mmc_host *',
-            'size_t *', 'unsigned char **', 'const char **', 'struct cdev *',
-            'dev_t', 'struct module *', 'struct file *', 'const struct file_operations *',
-            'struct device *', 'struct kobject *',
-          ]
-          lines = ['#include <linux/kernel.h>', '#include <linux/module.h>',
-                   '#include <linux/sched.h>', '#include <linux/types.h>',
-                   '#include <linux/cdev.h>', '#include <linux/fs.h>',
-                   '#include <linux/device.h>', '#include <asm/ptrace.h>',
-                   '#include <linux/mmc/card.h>', '']
-          for i, t in enumerate(types, 1):
-              lines.append('void tx%02d(%s a) { }' % (i, t))
-              lines.append('EXPORT_SYMBOL(tx%02d);' % i)
-          open('/tmp/typeprobe.c', 'w').write('\n'.join(lines) + '\n')
-          # one line per index so the parser can map back
-          open('/tmp/typeprobe.idx', 'w').write('\n'.join(
-              'tx%02d\t%s' % (i, t) for i, t in enumerate(types, 1)) + '\n')
-          print('probe types:', len(types))
+          import base64, os
+          os.makedirs('/tmp/sl', exist_ok=True)
+          meta = []
+          for line in open('slices.txt', encoding='utf-8'):
+              name, va, n, b64 = line.rstrip('\n').split('\t')
+              data = base64.b64decode(b64)
+              path = '/tmp/sl/%s.bin' % name
+              open(path, 'wb').write(data)
+              meta.append((name, va, len(data)))
+              print('%-45s va=%s bytes=%d' % (name, va, len(data)))
+          open('/tmp/sl/meta.txt', 'w').write('\n'.join('%s\t%s' % (n, v) for n, v, _ in meta) + '\n')
           PY
-          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" /tmp/typeprobe.c "$GITHUB_WORKSPACE/adapt.cmd" || true
-          cp /tmp/typeprobe.idx "$GITHUB_WORKSPACE/typeprobe.idx"
+
+      - name: disassemble
+        run: |
+          set -e
+          mkdir -p artifacts
+          while IFS=$'\t' read -r name va; do
+            echo "=============== $name (va $va) ===============" | tee -a artifacts/disasm.txt
+            aarch64-linux-gnu-objdump -D -b binary -m aarch64 \
+              --adjust-vma=$va /tmp/sl/$name.bin >> artifacts/disasm.txt
+          done < /tmp/sl/meta.txt
+          echo "--- summary of first 24 instructions per symbol ---" > artifacts/disasm-head.txt
+          awk '/^===============/{p=1;c=0} p&&c<26{print;c++}' artifacts/disasm.txt >> artifacts/disasm-head.txt
+          cat artifacts/disasm.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase6-tokens2
-          path: |
-            artifacts/Module.symvers.stock
-            btif.cmd
-            adapt.cmd
-            defs-*.txt
-            ver-*.txt
-            typeprobe.idx
+          name: phase7-disasm
+          path: artifacts/*
           if-no-files-found: warn
