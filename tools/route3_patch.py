@@ -67,5 +67,22 @@ new = (
 )
 if s.count(old) != 1:
     sys.exit('FATAL: put_ipc_ns mq_lock block not found exactly once (count=%d)' % s.count(old))
-open(p, 'w', encoding='utf-8').write(s.replace(old, new))
+s = s.replace(old, new)
+
+# ipc/msgutil.c (the usual definition of nr_ipc_ns) is only built when
+# CONFIG_SYSVIPC or CONFIG_POSIX_MQUEUE is on. Provide it here otherwise.
+anchor = '#include "util.h"\n'
+if s.count(anchor) != 1:
+    sys.exit('FATAL: util.h include not found exactly once (count=%d)' % s.count(anchor))
+define = (anchor +
+          '\n'
+          '#if !defined(CONFIG_SYSVIPC) && !defined(CONFIG_POSIX_MQUEUE)\n'
+          '/* ROUTE-3: ipc/msgutil.c is not built when both IPC flavours are off,\n'
+          ' * so the namespace counter is defined here instead.\n'
+          ' */\n'
+          'atomic_t nr_ipc_ns = ATOMIC_INIT(1);\n'
+          '#endif\n')
+s = s.replace(anchor, define)
+open(p, 'w', encoding='utf-8').write(s)
 print('[+] ipc/namespace.c: put_ipc_ns() mqueue cleanup guarded by CONFIG_POSIX_MQUEUE')
+print('[+] ipc/namespace.c: nr_ipc_ns defined when SYSVIPC=n and POSIX_MQUEUE=n')
