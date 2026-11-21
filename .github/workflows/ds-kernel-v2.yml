@@ -60,7 +60,8 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" scripts > scripts.log 2>&1 || { tail -30 scripts.log; exit 1; }
           ls -l scripts/genksyms/genksyms
           make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" init/main.o > ref.log 2>&1 || { tail -40 ref.log; exit 1; }
-          cp .init/main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
+          ls -la init/.main.o.cmd
+          cp init/.main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
           head -c 400 "$GITHUB_WORKSPACE/adapt.cmd"
 
       - name: recover signatures (batched genksyms CRC search)
