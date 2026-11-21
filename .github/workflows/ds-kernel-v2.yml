@@ -64,12 +64,19 @@ jobs:
           cp init/.main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
           head -c 400 "$GITHUB_WORKSPACE/adapt.cmd"
 
-      - name: probe pipeline
+      - name: probe pipeline (4 variants, tiny)
         run: |
           set -e
           cd kernel
-          python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
-          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
+          i=0
+          for mode in def_real decl_real def_dummy decl_dummy; do
+            i=$((i+1))
+            python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$mode" "$GITHUB_WORKSPACE/probe.c" "$GITHUB_WORKSPACE/probe.map"
+            python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
+            cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-$mode.txt"
+            echo "===== mode $mode ====="
+            cat "$GITHUB_WORKSPACE/allcrc-$mode.txt"
+          done
 
       - name: recover signatures (batched genksyms CRC search)
         run: |
@@ -77,6 +84,7 @@ jobs:
           cd kernel
           python3 "$GITHUB_WORKSPACE/tools/gen_candidates.py" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
           python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
+          cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-search.txt"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -84,7 +92,7 @@ jobs:
           name: phase4-sigrec2
           path: |
             cand.map
-            cand.ver
             sig-hits.txt
             adapt.cmd
+            allcrc-*.txt
           if-no-files-found: warn

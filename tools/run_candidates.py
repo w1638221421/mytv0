@@ -98,6 +98,14 @@ for line in ver.splitlines():
         crc[m2.group(1)] = int(m2.group(2), 16) & 0xFFFFFFFF
 print('candidate CRCs produced:', len(crc))
 
+# dump every candidate CRC so nothing is lost in the log
+with open(os.path.join(ws, 'allcrc.txt'), 'w') as f:
+    for k in sorted(crc):
+        f.write('%s\t%08x\n' % (k, crc[k]))
+print('--- all candidate CRCs ---')
+for k in sorted(crc):
+    print('  %-34s %08x' % (k, crc[k]))
+
 hits = {}
 base_hits = {}
 for line in open(os.path.join(ws, 'cand.map')):
