@@ -13,11 +13,37 @@ ws = sys.argv[1] if len(sys.argv) > 1 else '.'
 cmd_path = os.path.join(ws, 'adapt.cmd')
 
 text = open(cmd_path, encoding='utf-8', errors='replace').read()
-m = re.search(r':=(.*)', text, re.S)
-if not m:
-    sys.exit('cannot parse adapt.cmd')
-full = m.group(1).replace('\\\n', ' ')
+lines = text.splitlines()
+
+# The .cmd file holds several make variables; we only want the compiler command
+# line (savedcmd_<obj> := <cc> ...), including its '\'-continued lines, and must
+# NOT swallow the later deps_<obj> := $(wildcard ...) variables.
+start = None
+for i, l in enumerate(lines):
+    if ':=' in l and l.lstrip().startswith('savedcmd_'):
+        start = i
+        break
+if start is None:
+    for i, l in enumerate(lines):
+        if ':=' in l:
+            start = i
+            break
+if start is None:
+    sys.exit('cannot find a command line in %s' % cmd_path)
+
+buf = []
+j = start
+while j < len(lines):
+    l = lines[j]
+    if l.endswith('\\'):
+        buf.append(l[:-1])
+        j += 1
+        continue
+    buf.append(l)
+    break
+full = ' '.join(buf).split(':=', 1)[1]
 full = ' '.join(full.split())
+print('cmd line chars =', len(full))
 
 toks = shlex.split(full)
 cc = toks[0]
