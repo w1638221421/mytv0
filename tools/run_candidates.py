@@ -67,6 +67,10 @@ for t in toks[1:]:
 print('cc =', cc)
 print('cflags tokens =', len(keep))
 
+# include/linux/export.h keeps EXPORT_SYMBOL() as a literal token only when
+# __GENKSYMS__ is defined (that is what the kernel's own gensymtypes rule does).
+keep = ['-D__GENKSYMS__'] + keep
+
 src = os.path.join(ws, 'cand.c')
 i_out = os.path.join(ws, 'cand.i')
 r = subprocess.run([cc] + keep + ['-E', '-o', i_out, src], capture_output=True, text=True)
