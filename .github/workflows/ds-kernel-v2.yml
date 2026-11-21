@@ -23,35 +23,23 @@ jobs:
 
       - name: toolchain
         run: |
-          git clone --depth=1 -b lineage-16.0 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-gnu-6.3.1 "${GITHUB_WORKSPACE}/gcc631"
-          "${GITHUB_WORKSPACE}/gcc631/bin/aarch64-linux-gnu-gcc" --version | head -1
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
 
       - name: source and base config
         run: |
           set -e
-          git clone --depth=1 https://github.com/mahdi-salimi05/kernel_huawei_dura repo
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' repo/kernel-4.4/Makefile
-          cd repo/kernel-4.4
-          cp "$GITHUB_WORKSPACE/configs/stock.config" .config
-          echo "base symbols: $(grep -c '^CONFIG_\|^# CONFIG_' .config)"
-
-      - name: merge connectivity driver source
-        run: |
-          set -e
-          git clone --depth=1 https://github.com/gemian/cosmo-linux-kernel-4.4 cosmo
-          echo "cosmo connectivity dirs:"
-          ls cosmo/drivers/misc/mediatek/connectivity/
-          rm -rf repo/kernel-4.4/drivers/misc/mediatek/connectivity
-          cp -r cosmo/drivers/misc/mediatek/connectivity repo/kernel-4.4/drivers/misc/mediatek/connectivity
-          echo "merged connectivity:"
-          ls repo/kernel-4.4/drivers/misc/mediatek/connectivity/
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' kernel/Makefile
+          cp configs/stock.config kernel/.config
+          echo "base symbols: $(grep -c '^CONFIG_\|^# CONFIG_' kernel/.config)"
 
       - name: configure
         run: |
           set -e
-          cd repo/kernel-4.4
+          cd kernel
           export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc631/bin/aarch64-linux-gnu-"
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
 
           D=drivers/misc/mediatek/imgsensor/src/common/v1
           L=drivers/misc/mediatek/lcm
@@ -77,21 +65,12 @@ jobs:
           sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' .config || true
 
           echo "=== namespace options ==="
-          grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|SYSVIPC_SYSCTL|NET_NS|USER_NS|MODVERSIONS)=' .config || true
-          echo "=== paranoid network (must stay y) ==="
-          grep -E '^CONFIG_ANDROID_PARANOID_NETWORK=' .config || true
-
-      - name: layout-preserving patch
-        run: |
-          set -e
-          cd repo/kernel-4.4
-          python3 "$GITHUB_WORKSPACE/tools/move_sysvipc.py" include/linux/sched.h
-          python3 "$GITHUB_WORKSPACE/tools/add_offsets.py" arch/arm64/kernel/asm-offsets.c
+          grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|IPC_NS|SYSVIPC|NET_NS|USER_NS)=' .config || true
 
       - name: source hotfixes
         run: |
           set -e
-          cd repo/kernel-4.4
+          cd kernel
           sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
           sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
           sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
@@ -104,16 +83,15 @@ jobs:
       - name: fix vendor include paths
         run: |
           set -e
-          cd repo/kernel-4.4
+          cd kernel
           python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
-          python3 "$GITHUB_WORKSPACE/tools/fix_sensor_lists.py" .
 
       - name: build
         run: |
           set -e
-          cd repo/kernel-4.4
+          cd kernel
           export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc631/bin/aarch64-linux-gnu-"
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           if ! make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > build.log 2>&1; then
             echo "=== ERROR LINES ==="
             grep -nE "error:|fatal error|No rule to make|undefined reference|multiple definition|Error [0-9]" build.log | head -40
@@ -123,45 +101,15 @@ jobs:
           fi
           ls -l arch/arm64/boot/Image.gz
 
-      - name: build connectivity modules
-        run: |
-          set -e
-          cd repo/kernel-4.4
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc631/bin/aarch64-linux-gnu-"
-          # force the combo drivers to build as modules
-          scripts/config --file .config --module MTK_COMBO --module MTK_COMBO_WIFI --module MTK_COMBO_BT --module MTK_COMBO_GPS 2>/dev/null || true
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" olddefconfig
-          if ! make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" modules > modules.log 2>&1; then
-            echo "=== MODULE ERROR LINES ==="
-            grep -nE "error:|fatal error|No rule to make|undefined reference|multiple definition|Error [0-9]" modules.log | head -40
-            echo "=== TAIL ==="
-            tail -30 modules.log
-            exit 1
-          fi
-          echo "=== built modules ==="
-          find . -name "*.ko" -type f | sort
-
       - name: package
         run: |
           set -e
-          cd repo/kernel-4.4
+          cd kernel
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cp arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/artifacts/Image.gz.target"
-          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/Module.symvers.target"
           cp .config "$GITHUB_WORKSPACE/artifacts/config.target"
-          cp include/generated/asm-offsets.h "$GITHUB_WORKSPACE/artifacts/asm-offsets.target.h" 2>/dev/null || true
           cp include/config/kernel.release "$GITHUB_WORKSPACE/artifacts/kernel.release.target"
-          # collect built modules
-          mkdir -p "$GITHUB_WORKSPACE/artifacts/modules"
-          find . -name "*.ko" -type f -exec cp {} "$GITHUB_WORKSPACE/artifacts/modules/" \; 2>/dev/null || true
-          ls -l "$GITHUB_WORKSPACE/artifacts/modules/" || true
-          grep -E '^#define DS_' include/generated/asm-offsets.h > "$GITHUB_WORKSPACE/artifacts/offsets.target.txt" 2>/dev/null || true
-          python3 "$GITHUB_WORKSPACE/tools/check_crcs.py" Module.symvers "$GITHUB_WORKSPACE/configs/stock-modcrcs.txt" > "$GITHUB_WORKSPACE/artifacts/crc-gate.target.txt" 2>&1 || true
-          echo "=== CRC gate ==="
-          cat "$GITHUB_WORKSPACE/artifacts/crc-gate.target.txt"
-          echo "=== release ==="
-          cat "$GITHUB_WORKSPACE/artifacts/kernel.release.target"
+          cat include/config/kernel.release
           ls -l "$GITHUB_WORKSPACE/artifacts/"
 
       - uses: actions/upload-artifact@v4
