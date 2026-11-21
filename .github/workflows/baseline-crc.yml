@@ -3,6 +3,8 @@ name: baseline-crc
 # 目标：复现 2018-08 量产内核的 Module.symvers CRC，比对 339 个原厂模块 __versions。
 
 on:
+  push:
+    branches: [baseline-crc-run]
   workflow_dispatch:
 
 jobs:
