@@ -56,7 +56,8 @@ jobs:
           scripts/config --file .config \
             --enable SYSVIPC --enable SYSVIPC_SYSCTL \
             --enable NAMESPACES --enable UTS_NS --enable IPC_NS --enable PID_NS \
-            --disable NET_NS --disable USER_NS
+            --disable NET_NS --disable USER_NS \
+            --disable ANDROID_PARANOID_NETWORK
 
           make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" olddefconfig
           scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
