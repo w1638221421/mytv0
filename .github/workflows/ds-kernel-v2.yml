@@ -1,12 +1,12 @@
-name: phase5-tokens
+name: phase6-tokens2
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  tokens:
-    name: tokens
+  tokens2:
+    name: tokens2
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
@@ -55,83 +55,71 @@ jobs:
           done
           python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
 
-      - name: full build (produces every .cmd and Module.symvers)
+      - name: full build
         run: |
           set -e
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "$GITHUB_WORKSPACE/build.log" 2>&1 || {
-            grep -nE "error:|fatal error|undefined reference|No rule to make|Error [0-9]" "$GITHUB_WORKSPACE/build.log" | head -20
+            grep -nE "error:|fatal error|undefined reference|Error [0-9]" "$GITHUB_WORKSPACE/build.log" | head -20
             tail -30 "$GITHUB_WORKSPACE/build.log"; exit 1; }
-          ls -l arch/arm64/boot/Image.gz Module.symvers
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cp Module.symvers "$GITHUB_WORKSPACE/artifacts/Module.symvers.stock"
+          ls -l drivers/misc/mediatek/btif/common/.mtk_btif_exp.o.cmd
 
-      - name: dump tokens for the REAL adapter source
+      - name: dump btif export file tokens
         run: |
           set -e
           cd kernel
-          A=drivers/misc/mediatek/connectivity/common
-          ls -l "$A/.connectivity_build_in_adapter.o.cmd"
-          cp "$A/.connectivity_build_in_adapter.o.cmd" "$GITHUB_WORKSPACE/adapt.cmd"
-          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" "$A/connectivity_build_in_adapter.c" "$GITHUB_WORKSPACE/adapt.cmd"
+          cp drivers/misc/mediatek/btif/common/.mtk_btif_exp.o.cmd "$GITHUB_WORKSPACE/btif.cmd"
+          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" \
+            drivers/misc/mediatek/btif/common/mtk_btif_exp.c "$GITHUB_WORKSPACE/btif.cmd" || true
 
-      - name: dump tokens for a probe file (type expansions)
+      - name: dump type-expansion probe (40 types)
         run: |
           set -e
           cd kernel
-          cat > "$GITHUB_WORKSPACE/probe_decl.c" <<'EOF'
-          #include <linux/kernel.h>
-          #include <linux/module.h>
-          #include <linux/sched.h>
-          #include <linux/mmc/card.h>
-          void t01(struct task_struct *a) { }
-          EXPORT_SYMBOL(t01);
-          void t02(unsigned long *a) { }
-          EXPORT_SYMBOL(t02);
-          void t03(unsigned long a) { }
-          EXPORT_SYMBOL(t03);
-          void t04(int a) { }
-          EXPORT_SYMBOL(t04);
-          void t05(unsigned int a) { }
-          EXPORT_SYMBOL(t05);
-          void t06(unsigned a) { }
-          EXPORT_SYMBOL(t06);
-          void t07(char *a) { }
-          EXPORT_SYMBOL(t07);
-          void t08(const char *a) { }
-          EXPORT_SYMBOL(t08);
-          void t09(void *a) { }
-          EXPORT_SYMBOL(t09);
-          void t10(struct mmc_card *a) { }
-          EXPORT_SYMBOL(t10);
-          void t11(unsigned char a) { }
-          EXPORT_SYMBOL(t11);
-          void t12(bool a) { }
-          EXPORT_SYMBOL(t12);
-          void t13(int *a) { }
-          EXPORT_SYMBOL(t13);
-          void t14(unsigned int *a) { }
-          EXPORT_SYMBOL(t14);
-          void t15(unsigned char *a) { }
-          EXPORT_SYMBOL(t15);
-          void t16(u8 a) { }
-          EXPORT_SYMBOL(t16);
-          void t17(u8 *a) { }
-          EXPORT_SYMBOL(t17);
-          void t18(unsigned long a, unsigned long b) { }
-          EXPORT_SYMBOL(t18);
-          EOF
-          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/probe_decl.c" "$GITHUB_WORKSPACE/adapt.cmd"
+          python3 - <<'PY'
+          types = [
+            'int', 'unsigned int', 'unsigned', 'unsigned long', 'long', 'char',
+            'char *', 'const char *', 'void *', 'u8', 'u8 *', 'unsigned char',
+            'unsigned char *', 'bool', 'short', 'unsigned short', 'int *',
+            'unsigned int *', 'unsigned long *', 'struct task_struct *',
+            'struct mmc_card *', 'unsigned long long', 'u32', 'u64', 'size_t',
+            'char **', 'void **', 'struct pt_regs *', 'const void *', 'long long',
+            's32', 'struct sdio_func *', 'const unsigned char *', 'u16', 'u16 *',
+            'unsigned short *', 'const struct task_struct *', 'struct mmc_host *',
+            'size_t *', 'unsigned char **', 'const char **', 'struct cdev *',
+            'dev_t', 'struct module *', 'struct file *', 'const struct file_operations *',
+            'struct device *', 'struct kobject *',
+          ]
+          lines = ['#include <linux/kernel.h>', '#include <linux/module.h>',
+                   '#include <linux/sched.h>', '#include <linux/types.h>',
+                   '#include <linux/cdev.h>', '#include <linux/fs.h>',
+                   '#include <linux/device.h>', '#include <asm/ptrace.h>',
+                   '#include <linux/mmc/card.h>', '']
+          for i, t in enumerate(types, 1):
+              lines.append('void tx%02d(%s a) { }' % (i, t))
+              lines.append('EXPORT_SYMBOL(tx%02d);' % i)
+          open('/tmp/typeprobe.c', 'w').write('\n'.join(lines) + '\n')
+          # one line per index so the parser can map back
+          open('/tmp/typeprobe.idx', 'w').write('\n'.join(
+              'tx%02d\t%s' % (i, t) for i, t in enumerate(types, 1)) + '\n')
+          print('probe types:', len(types))
+          PY
+          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" /tmp/typeprobe.c "$GITHUB_WORKSPACE/adapt.cmd" || true
+          cp /tmp/typeprobe.idx "$GITHUB_WORKSPACE/typeprobe.idx"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase5-tokens
+          name: phase6-tokens2
           path: |
             artifacts/Module.symvers.stock
+            btif.cmd
             adapt.cmd
             defs-*.txt
             ver-*.txt
+            typeprobe.idx
           if-no-files-found: warn
