@@ -110,14 +110,28 @@ for line in open(os.path.join(ws, 'cand.map')):
     if b0 != '-' and got == int(b0, 16):
         base_hits.setdefault(tag, []).append((sig, got))
 
-print('\n=== PIPELINE SANITY: candidates reproducing the BUILD-0 (GPL) CRC ===')
+print('\n=== PIPELINE SELF-TEST (known BUILD-0 CRCs) ===')
+for tag in ['selftest']:
+    h = hits.get(tag, [])
+    if h:
+        for sig, got in h:
+            print('  SELFTEST OK  %08x  %s' % (got, sig))
+    else:
+        print('  SELFTEST FAILED -- no known-good CRC reproduced; results unreliable')
+        # show what the self-test candidates actually produced
+        for line in open(os.path.join(ws, 'cand.map')):
+            name, t, expect, alt, sig = line.rstrip('\n').split('\t')
+            if t == 'selftest' and name in crc:
+                print('    got %08x want %s  %s' % (crc[name], expect, sig))
+
+print('\n=== BASELINE (GPL) CANDIDATE CRCs vs BUILD-0 ===')
 order = ['show_stack', 'tracing_record_cmdline', 'mmc_io_rw_direct',
          'dump_thread_state', 'btif_dbg_ctrl']
 for tag in order:
     for sig, got in base_hits.get(tag, [])[:3]:
         print('  %-24s %08x  %s' % (tag, got, sig))
     if not base_hits.get(tag):
-        print('  %-24s (none)' % tag)
+        print('  %-24s (no candidate reproduced the BUILD-0 CRC)' % tag)
 
 print('\n=== PRODUCTION CRC MATCHES ===')
 for tag in order:
@@ -129,6 +143,9 @@ for tag in order:
         print('  %-24s NO MATCH' % tag)
 
 with open(os.path.join(ws, 'sig-hits.txt'), 'w') as f:
+    f.write('# pipeline self-test\n')
+    for sig, got in hits.get('selftest', []):
+        f.write('SELFTEST\t%08x\t%s\n' % (got, sig))
     f.write('# production CRC matches\n')
     for tag in order:
         for sig, got in hits.get(tag, []):
