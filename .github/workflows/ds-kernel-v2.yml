@@ -71,7 +71,7 @@ jobs:
           i=0
           for mode in def_real decl_real def_dummy decl_dummy; do
             i=$((i+1))
-            python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$mode" "$GITHUB_WORKSPACE/probe.c" "$GITHUB_WORKSPACE/probe.map"
+            python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$mode" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
             python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
             cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-$mode.txt"
             echo "===== mode $mode ====="
