@@ -1,0 +1,11 @@
+name: test-min
+on:
+  push:
+    branches: [test-min-run]
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo hello
