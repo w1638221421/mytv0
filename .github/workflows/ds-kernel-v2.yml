@@ -1,5 +1,4 @@
-name: phase2-config
-# Phase 2: config resolution experiments (CASE-0..4) via make olddefconfig, NO full build.
+name: phase2-case5
 on:
   push:
     branches: [ds-kernel-v2]
@@ -8,121 +7,69 @@ on:
 jobs:
   resolve:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - name: deps
-        run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc make bison flex bc
-
-      - name: clone source (clean copy)
-        run: |
-          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
-          echo "commit: $(git -C kernel rev-parse HEAD)"
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' kernel/Makefile
-
-      - name: run config cases
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc make bison flex bc
+      - name: clone
+        run: git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+      - name: cases
         run: |
           set -e
           mkdir -p artifacts
           cd kernel
           export ARCH=arm64
-
           run_case() {
             local CASE="$1"; shift
             cp ../configs/stock.config .config
-            local opts=()
             while [ $# -gt 0 ]; do
               local k="$1"; local v="$2"; shift 2
               if [ "$v" = "y" ]; then scripts/config --file .config --enable "$k";
               elif [ "$v" = "n" ]; then scripts/config --file .config --disable "$k"; fi
             done
-            make ARCH=arm64 olddefconfig > "../artifacts/$CASE.log" 2>&1 || { echo "FATAL $CASE olddefconfig failed"; tail -20 "../artifacts/$CASE.log"; exit 1; }
+            make ARCH=arm64 olddefconfig > "../artifacts/$CASE.log" 2>&1 || { echo "FATAL $CASE"; tail -20 "../artifacts/$CASE.log"; exit 1; }
             cp .config "../artifacts/$CASE.config"
             echo "case $CASE done"
           }
-
-          # CASE-0: pure stock
-          run_case CASE-0
-          # CASE-1: only NAMESPACES
-          run_case CASE-1 NAMESPACES y
-          # CASE-2: NAMESPACES + UTS_NS + PID_NS
-          run_case CASE-2 NAMESPACES y UTS_NS y PID_NS y
-          # CASE-3: NAMESPACES + IPC_NS, SYSVIPC explicitly n (KEY)
-          run_case CASE-3 NAMESPACES y IPC_NS y SYSVIPC n
-          # CASE-4: full DroidSpaces namespace set
-          run_case CASE-4 NAMESPACES y UTS_NS y PID_NS y IPC_NS y SYSVIPC y SYSVIPC_SYSCTL y
-
-      - name: summarize matrix
+          # CASE-5: IPC_NS via POSIX_MQUEUE (SYSVIPC stays n) -- ABI-safe route test
+          run_case CASE-5 NAMESPACES y UTS_NS y PID_NS y IPC_NS y POSIX_MQUEUE y SYSVIPC n NET_NS n USER_NS n
+          # CASE-6: recommended full container config (SYSVIPC=n), verify all namespaces on, NET_NS/USER_NS off
+          run_case CASE-6 NAMESPACES y UTS_NS y PID_NS y IPC_NS y POSIX_MQUEUE y SYSVIPC n NET_NS n USER_NS n SECCOMP y SECCOMP_FILTER y CGROUPS y CGROUP_FREEZER y DEVTMPFS y TMPFS_POSIX_ACL y TMPFS_XATTR y OVERLAY_FS y
+      - name: summarize
         run: |
           cd kernel
           python3 - <<'PY'
-          import re, os
-          SYMS = ["SYSVIPC","SYSVIPC_SYSCTL","NAMESPACES","UTS_NS","IPC_NS","PID_NS","NET_NS","USER_NS",
-                  "CGROUPS","CGROUP_NS","SECCOMP","SECCOMP_FILTER","POSIX_MQUEUE","CGROUP_FREEZER",
-                  "CGROUP_PIDS","CGROUP_DEVICE","CGROUP_CPUACCT","CGROUP_SCHED","MEMCG","BLK_CGROUP",
-                  "OVERLAY_FS","VETH","BRIDGE","NETFILTER","NF_NAT","IP_NF_IPTABLES","TUN",
-                  "DEVPTS_MULTIPLE_INSTANCES","KEYS"]
+          import re
+          SYMS=["SYSVIPC","SYSVIPC_SYSCTL","NAMESPACES","UTS_NS","IPC_NS","PID_NS","NET_NS","USER_NS",
+                "POSIX_MQUEUE","SECCOMP","SECCOMP_FILTER","CGROUPS","CGROUP_FREEZER","DEVTMPFS",
+                "TMPFS_POSIX_ACL","TMPFS_XATTR","OVERLAY_FS","CGROUP_DEVICE","CGROUP_PIDS"]
           def load(p):
               d={}
-              for ln in open(p, encoding='utf-8', errors='replace'):
+              for ln in open(p,encoding='utf-8',errors='replace'):
                   ln=ln.strip()
-                  m=re.match(r'^(CONFIG_[A-Z0-9_]+)=(.*)$', ln)
+                  m=re.match(r'^(CONFIG_[A-Z0-9_]+)=(.*)$',ln)
                   if m: d[m.group(1)]=m.group(2); continue
-                  m=re.match(r'^# (CONFIG_[A-Z0-9_]+) is not set$', ln)
+                  m=re.match(r'^# (CONFIG_[A-Z0-9_]+) is not set$',ln)
                   if m: d[m.group(1)]='n'
               return d
-          cases=["CASE-0","CASE-1","CASE-2","CASE-3","CASE-4"]
-          out=[]
-          out.append("symbol,stock_input,"+",".join(cases))
-          stock=load("../configs/stock.config")
-          finals={c: load("../artifacts/%s.config"%c) for c in cases}
-          for s in SYMS:
-              k="CONFIG_"+s
-              row=[s, str(stock.get(k))]
-              for c in cases:
-                  row.append(str(finals[c].get(k)))
-              out.append(",".join(row))
-          open("../artifacts/config-matrix.csv","w").write("\n".join(out)+"\n")
-          print("\n".join(out))
-          # also print the key IPC_NS / SYSVIPC decision
-          print("\n=== KEY DECISION ===")
-          for c in cases:
-              print(f"{c}: SYSVIPC={finals[c].get('CONFIG_SYSVIPC')} IPC_NS={finals[c].get('CONFIG_IPC_NS')} "
-                    f"NAMESPACES={finals[c].get('CONFIG_NAMESPACES')} UTS_NS={finals[c].get('CONFIG_UTS_NS')} "
-                    f"PID_NS={finals[c].get('CONFIG_PID_NS')}")
-          PY
-
-      - name: diffs vs CASE-0
-        run: |
-          cd kernel
-          python3 - <<'PY'
-          import re, os
-          def load(p):
-              d={}
-              for ln in open(p, encoding='utf-8', errors='replace'):
-                  ln=ln.strip()
-                  m=re.match(r'^(CONFIG_[A-Z0-9_]+)=(.*)$', ln)
-                  if m: d[m.group(1)]=m.group(2); continue
-                  m=re.match(r'^# (CONFIG_[A-Z0-9_]+) is not set$', ln)
-                  if m: d[m.group(1)]='n'
-              return d
-          base=load("../artifacts/CASE-0.config")
-          for c in ["CASE-1","CASE-2","CASE-3","CASE-4"]:
+          for c in ["CASE-5","CASE-6"]:
               d=load("../artifacts/%s.config"%c)
-              ch=[(k, base.get(k), d.get(k)) for k in sorted(set(base)|set(d)) if base.get(k)!=d.get(k)]
-              with open("../artifacts/diff-%s-vs-CASE0.txt"%c,"w") as f:
-                  f.write("changed symbols: %d\n"%len(ch))
-                  for k,a,b in ch: f.write("  %s: %s -> %s\n"%(k,a,b))
-              print(f"{c} vs CASE-0: {len(ch)} changed symbols")
+              print("== "+c)
+              for s in SYMS:
+                  print("  %-22s %s" % (s, d.get("CONFIG_"+s)))
+          # diff CASE-6 vs stock
+          stock=load("../configs/stock.config")
+          d6=load("../artifacts/CASE-6.config")
+          ch=[(k,stock.get(k),d6.get(k)) for k in sorted(set(stock)|set(d6)) if stock.get(k)!=d6.get(k)]
+          open("../artifacts/diff-CASE6-vs-stock.txt","w").write("changed: %d\n"%len(ch)+"\n".join("  %s: %s -> %s"%(k,a,b) for k,a,b in ch))
+          print("== CASE-6 changed vs stock: %d"%len(ch))
+          for k,a,b in ch: print("  %s: %s -> %s"%(k,a,b))
           PY
           ls -l ../artifacts/
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase2-config
+          name: phase2-case5
           path: artifacts/*
           if-no-files-found: warn
