@@ -64,19 +64,55 @@ jobs:
           cp init/.main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
           head -c 400 "$GITHUB_WORKSPACE/adapt.cmd"
 
-      - name: probe pipeline (4 variants, tiny)
+      - name: probe pipeline (variants + genksyms -D token dump)
         run: |
           set -e
           cd kernel
-          i=0
           for mode in def_real decl_real def_dummy decl_dummy; do
-            i=$((i+1))
             python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$mode" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
             python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
             cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-$mode.txt"
             echo "===== mode $mode ====="
             cat "$GITHUB_WORKSPACE/allcrc-$mode.txt"
           done
+
+          # exact source text with parameter names, as the real vendor .c has it
+          cat > "$GITHUB_WORKSPACE/cand.c" <<'EOF'
+          #include <linux/kernel.h>
+          #include <linux/module.h>
+          #include <linux/cdev.h>
+          int cdev_add(struct cdev *p, dev_t dev, unsigned count) { }
+          EXPORT_SYMBOL(cdev_add);
+          void cdev_del(struct cdev *p) { }
+          EXPORT_SYMBOL(cdev_del);
+          EOF
+          cat > "$GITHUB_WORKSPACE/cand.map" <<'EOF'
+          cdev_add	probe	1d092a8a	-	int | struct cdev * p | dev_t dev | unsigned count
+          cdev_del	probe	020f71e8	-	void | struct cdev * p
+          EOF
+          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
+          cp "$GITHUB_WORKSPACE/allcrc.txt" "$GITHUB_WORKSPACE/allcrc-pnames.txt"
+          echo "===== mode pnames ====="
+          cat "$GITHUB_WORKSPACE/allcrc-pnames.txt"
+
+      - name: dump genksyms token streams for the MTK baseline signatures
+        run: |
+          set -e
+          cd kernel
+          cat > "$GITHUB_WORKSPACE/cand.c" <<'EOF'
+          #include <linux/kernel.h>
+          #include <linux/module.h>
+          #include <linux/sched.h>
+          #include <linux/mmc/card.h>
+          void connectivity_export_show_stack(struct task_struct *tsk, unsigned long *sp) { }
+          EXPORT_SYMBOL(connectivity_export_show_stack);
+          void connectivity_export_tracing_record_cmdline(struct task_struct *tsk) { }
+          EXPORT_SYMBOL(connectivity_export_tracing_record_cmdline);
+          int connectivity_export_mmc_io_rw_direct(struct mmc_card *card, int write, unsigned fn, unsigned addr, u8 in, u8 *out) { }
+          EXPORT_SYMBOL(connectivity_export_mmc_io_rw_direct);
+          EOF
+          python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" > "$GITHUB_WORKSPACE/defs.log" 2>&1 || true
+          head -c 4000 "$GITHUB_WORKSPACE/defs.log"
 
       - name: recover signatures (batched genksyms CRC search)
         run: |
@@ -95,4 +131,6 @@ jobs:
             sig-hits.txt
             adapt.cmd
             allcrc-*.txt
+            defs.log
+            defs-dump.txt
           if-no-files-found: warn
