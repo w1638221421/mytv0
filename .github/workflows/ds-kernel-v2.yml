@@ -1,11 +1,11 @@
-name: phase3-gate
+name: phase4-route3
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  gate:
+  build3:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
@@ -17,29 +17,80 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
           sudo ln -sf /usr/bin/python2.7 /usr/bin/python
-          python -V
 
       - name: toolchain
         run: |
           git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
-          "${GITHUB_WORKSPACE}/gcc49/bin/aarch64-linux-android-gcc" --version | head -1
 
-      - name: clone source (x2 independent copies)
-        run: |
-          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel0
-          cp -r kernel0 kernel2
-          echo "commit: $(git -C kernel0 rev-parse HEAD)"
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)\s*=' kernel0/Makefile
-
-      - name: build BUILD-0 (stock baseline)
+      - name: clone + baseline ref build (BUILD-0 for comparison)
         run: |
           set -e
-          cd kernel0
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel3
+          cp -r kernel3 kernelref
+          echo "commit: $(git -C kernel3 rev-parse HEAD)" | tee artifacts-commit.txt
+          mkdir -p artifacts
+
+      - name: route-3 patch (init/Kconfig + ipc/namespace.c)
+        run: |
+          set -e
+          cd kernel3
+          python3 - <<'PY'
+          p='init/Kconfig'
+          s=open(p,encoding='utf-8').read()
+          old="""config IPC_NS
+	bool "IPC namespace"
+	depends on (SYSVIPC || POSIX_MQUEUE)
+	default y"""
+          new="""config IPC_NS
+	bool "IPC namespace"
+	# ROUTE-3: allow IPC namespace with both SysV IPC and POSIX mqueue off.
+	# The namespace then only isolates an empty ipc_namespace (no sem/shm/msg,
+	# no mqueue), which is exactly what the container needs and keeps
+	# struct task_struct / struct user_struct byte-identical to stock.
+	default y"""
+          assert s.count(old)==1, 'IPC_NS block not found (count=%d)' % s.count(old)
+          open(p,'w',encoding='utf-8').write(s.replace(old,new))
+          print('[+] init/Kconfig: IPC_NS dependency removed')
+
+          p='ipc/namespace.c'
+          s=open(p,encoding='utf-8').read()
+          old="""	if (atomic_dec_and_lock(&ns->count, &mq_lock)) {
+		mq_clear_sbinfo(ns);
+		spin_unlock(&mq_lock);
+		mq_put_mnt(ns);
+		free_ipc_ns(ns);
+	}"""
+          new="""#ifdef CONFIG_POSIX_MQUEUE
+	if (atomic_dec_and_lock(&ns->count, &mq_lock)) {
+		mq_clear_sbinfo(ns);
+		spin_unlock(&mq_lock);
+		mq_put_mnt(ns);
+		free_ipc_ns(ns);
+	}
+#else
+	/* No POSIX mqueue: no mqueue superblock / mq_lock to release. */
+	if (atomic_dec_and_test(&ns->count))
+		free_ipc_ns(ns);
+#endif"""
+          assert s.count(old)==1, 'put_ipc_ns mq_lock block not found (count=%d)' % s.count(old)
+          open(p,'w',encoding='utf-8').write(s.replace(old,new))
+          print('[+] ipc/namespace.c: put_ipc_ns mqueue cleanup guarded')
+          PY
+          (cd "$GITHUB_WORKSPACE" && git -C kernel3 diff > artifacts/route3.patch) || true
+          cat "$GITHUB_WORKSPACE/artifacts/route3.patch"
+
+      - name: build helper
+        run: |
+          cat > "$GITHUB_WORKSPACE/buildone.sh" <<'EOS'
+          #!/bin/bash
+          # $1 = src dir, $2 = out subdir, $3 = "route3" to apply container config
+          set -e
+          SRC="$1"; OUT="$2"; MODE="$3"
+          cd "$SRC"
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           echo "+" > .scmversion
           cp "$GITHUB_WORKSPACE/configs/stock.config" .config
-
           D=drivers/misc/mediatek/imgsensor/src/common/v1
           L=drivers/misc/mediatek/lcm
           S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' .config | cut -d'"' -f2)
@@ -48,15 +99,19 @@ jobs:
           C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' .config | cut -d'"' -f2)
           K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x"; done
           scripts/config --file .config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
-
           sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
           scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          if [ "$MODE" = "route3" ]; then
+            scripts/config --file .config \
+              --enable NAMESPACES --enable UTS_NS --enable PID_NS --enable IPC_NS \
+              --disable POSIX_MQUEUE --disable SYSVIPC --disable SYSVIPC_SYSCTL \
+              --disable NET_NS --disable USER_NS --disable MEMCG
+          fi
           make ARCH=arm64 olddefconfig
           scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
           make ARCH=arm64 olddefconfig
           sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
           sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' .config || true
-
           sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
           sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
           sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
@@ -66,81 +121,40 @@ jobs:
             [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
           python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "$GITHUB_WORKSPACE/$OUT.log" 2>&1
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/$OUT"
+          cp arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/artifacts/$OUT/Image.gz"
+          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/$OUT/Module.symvers"
+          cp .config "$GITHUB_WORKSPACE/artifacts/$OUT/config.txt"
+          cp include/config/kernel.release "$GITHUB_WORKSPACE/artifacts/$OUT/kernel.release"
+          ls ipc/*.o 2>/dev/null > "$GITHUB_WORKSPACE/artifacts/$OUT/ipc-objects.txt" || true
+          (cd arch/arm64/boot && sha256sum Image.gz) > "$GITHUB_WORKSPACE/artifacts/$OUT/Image.gz.sha256"
+          cp "$GITHUB_WORKSPACE/$OUT.log" "$GITHUB_WORKSPACE/artifacts/$OUT/build.log"
+          EOS
+          chmod +x "$GITHUB_WORKSPACE/buildone.sh"
 
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "$GITHUB_WORKSPACE/build0.log" 2>&1
-
-          mkdir -p "$GITHUB_WORKSPACE/artifacts/BUILD-0"
-          cp arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/artifacts/BUILD-0/Image.gz"
-          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/BUILD-0/Module.symvers"
-          cp .config "$GITHUB_WORKSPACE/artifacts/BUILD-0/config.txt"
-          cp include/config/kernel.release "$GITHUB_WORKSPACE/artifacts/BUILD-0/kernel.release"
-          ls ipc/*.o 2>/dev/null > "$GITHUB_WORKSPACE/artifacts/BUILD-0/ipc-objects.txt" || true
-          (cd arch/arm64/boot && sha256sum Image.gz) > "$GITHUB_WORKSPACE/artifacts/BUILD-0/Image.gz.sha256"
-          cp "$GITHUB_WORKSPACE/build0.log" "$GITHUB_WORKSPACE/artifacts/BUILD-0/build.log"
-          echo "BUILD-0 done"
-
-      - name: build BUILD-2 (minimal container candidate)
+      - name: BUILD-3 (route 3)
         run: |
           set -e
-          cd kernel2
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          echo "+" > .scmversion
-          cp "$GITHUB_WORKSPACE/configs/stock.config" .config
+          bash "$GITHUB_WORKSPACE/buildone.sh" "$GITHUB_WORKSPACE/kernel3" BUILD-3 route3 || {
+            echo "=== ERROR LINES ==="
+            grep -nE "error:|fatal error|undefined reference|No rule to make|multiple definition|Error [0-9]" "$GITHUB_WORKSPACE/BUILD-3.log" | head -40
+            echo "=== TAIL ==="
+            tail -30 "$GITHUB_WORKSPACE/BUILD-3.log"
+            mkdir -p "$GITHUB_WORKSPACE/artifacts/BUILD-3"
+            cp "$GITHUB_WORKSPACE/BUILD-3.log" "$GITHUB_WORKSPACE/artifacts/BUILD-3/build.log"
+            exit 1
+          }
 
-          D=drivers/misc/mediatek/imgsensor/src/common/v1
-          L=drivers/misc/mediatek/lcm
-          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' .config | cut -d'"' -f2)
-          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x"; done
-          scripts/config --file .config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
-          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' .config | cut -d'"' -f2)
-          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x"; done
-          scripts/config --file .config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+      - name: BUILD-0 ref (unpatched source, stock config)
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/buildone.sh" "$GITHUB_WORKSPACE/kernelref" BUILD-0 stock
 
-          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
-          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
-
-          # minimal container: namespaces + POSIX mqueue (for IPC_NS), NO SYSVIPC/NET_NS/USER_NS/MEMCG
-          scripts/config --file .config \
-            --enable NAMESPACES --enable UTS_NS --enable PID_NS --enable POSIX_MQUEUE --enable IPC_NS \
-            --disable SYSVIPC --disable SYSVIPC_SYSCTL --disable NET_NS --disable USER_NS --disable MEMCG
-
-          make ARCH=arm64 olddefconfig
-          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
-          make ARCH=arm64 olddefconfig
-          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
-          sed -i 's/^CONFIG_CMA_DEBUGFS=y/# CONFIG_CMA_DEBUGFS is not set/' .config || true
-
-          echo "=== BUILD-2 key options ==="
-          grep -E '^CONFIG_(NAMESPACES|UTS_NS|PID_NS|POSIX_MQUEUE|IPC_NS|SYSVIPC|NET_NS|USER_NS|MEMCG)=' .config || true
-
-          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
-          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
-          sed -i 's/^\([[:space:]]*\)sysctl_sched_migration_cost = /\1*(unsigned int *)\&sysctl_sched_migration_cost = /' drivers/misc/mediatek/sched/sched_ctl.c
-          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
-          grep -q 'Wno-error=return-type' Makefile || sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile
-          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
-            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
-          done
-          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
-
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" Image.gz > "$GITHUB_WORKSPACE/build2.log" 2>&1
-
-          mkdir -p "$GITHUB_WORKSPACE/artifacts/BUILD-2"
-          cp arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/artifacts/BUILD-2/Image.gz"
-          cp Module.symvers "$GITHUB_WORKSPACE/artifacts/BUILD-2/Module.symvers"
-          cp .config "$GITHUB_WORKSPACE/artifacts/BUILD-2/config.txt"
-          cp include/config/kernel.release "$GITHUB_WORKSPACE/artifacts/BUILD-2/kernel.release"
-          ls ipc/*.o 2>/dev/null > "$GITHUB_WORKSPACE/artifacts/BUILD-2/ipc-objects.txt" || true
-          (cd arch/arm64/boot && sha256sum Image.gz) > "$GITHUB_WORKSPACE/artifacts/BUILD-2/Image.gz.sha256"
-          cp "$GITHUB_WORKSPACE/build2.log" "$GITHUB_WORKSPACE/artifacts/BUILD-2/build.log"
-          echo "BUILD-2 done"
-
-      - name: gate checks
+      - name: gate
         run: |
           cd "$GITHUB_WORKSPACE"
           python3 - <<'PY'
-          import re, hashlib
           def load_symvers(p):
               d={}
               for ln in open(p,encoding='utf-8',errors='replace'):
@@ -157,28 +171,24 @@ jobs:
               return d
           need=load_need("configs/stock-modcrcs.txt")
           s0=load_symvers("artifacts/BUILD-0/Module.symvers")
-          s2=load_symvers("artifacts/BUILD-2/Module.symvers")
-          def cmp(s):
-              m=mi=0; mm=[]
+          s3=load_symvers("artifacts/BUILD-3/Module.symvers")
+          def cnt(s):
+              m=mi=0
               for n,e in need.items():
                   a=s.get(n)
-                  if a is None: mi+=1; mm.append(n)
+                  if a is None: mi+=1
                   elif a==e: m+=1
-                  else: mm.append(n)
-              return m, len(need)-m-mi, mi, mm
-          m0,x0,z0,_=cmp(s0)
-          m2,x2,z2,mm2=cmp(s2)
-          # CRC changes BUILD-2 vs BUILD-0 over the 339
-          changed=[n for n in need if s0.get(n)!=s2.get(n)]
+              return m,len(need)-m-mi,mi
+          m0,x0,z0=cnt(s0); m3,x3,z3=cnt(s3)
+          changed=[n for n in need if s0.get(n)!=s3.get(n)]
           key=['module_layout','cdev_add','cdev_del','__mutex_init']
           out=[]
-          out.append("BUILD-0: matched=%d mismatched=%d missing=%d" % (m0,x0,z0))
-          out.append("BUILD-2: matched=%d mismatched=%d missing=%d" % (m2,x2,z2))
-          out.append("BUILD-2 vs BUILD-0 changed symbols (of 339): %d" % len(changed))
-          for n in changed: out.append("  CHANGED %s: %08x -> %08x" % (n, s0.get(n,0), s2.get(n,0)))
-          out.append("key symbols (BUILD-2):")
+          out.append("BUILD-0: %d MATCH / %d MISMATCH / %d MISSING"%(m0,x0,z0))
+          out.append("BUILD-3: %d MATCH / %d MISMATCH / %d MISSING"%(m3,x3,z3))
+          out.append("BUILD-3 vs BUILD-0 changed symbols: %d"%len(changed))
+          for n in changed[:40]: out.append("  CHANGED %s: %08x -> %08x"%(n,s0.get(n,0),s3.get(n,0)))
           for k in key:
-              out.append("  %s: expect=%08x build0=%08x build2=%08x %s" % (k, need.get(k,0), s0.get(k,0), s2.get(k,0), "MATCH" if s2.get(k)==need.get(k) else "MISMATCH/MISSING"))
+              out.append("  KEY %s: expect=%08x build0=%08x build3=%08x %s"%(k,need.get(k,0),s0.get(k,0),s3.get(k,0),"MATCH" if s3.get(k)==need.get(k) else "FAIL"))
           open("artifacts/gate-summary.txt","w").write("\n".join(out)+"\n")
           print("\n".join(out))
           PY
@@ -186,6 +196,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase3-gate
-          path: artifacts/**
+          name: phase4-route3
+          path: |
+            artifacts/**
+            artifacts-commit.txt
           if-no-files-found: warn
