@@ -1,56 +1,117 @@
-name: phase7-disasm
+name: phase8-typeprobe
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  disasm:
-    name: disasm
+  typeprobe:
+    name: typeprobe
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: binutils for aarch64
+      - name: deps
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
-          aarch64-linux-gnu-objdump --version | head -1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
+          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
 
-      - name: decode slices from slices.txt
+      - name: toolchain
+        run: |
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
+
+      - name: clone + prepare only (no full build)
+        run: |
+          set -e
+          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+          echo "+" > .scmversion
+          cp "$GITHUB_WORKSPACE/configs/stock.config" .config
+          D=drivers/misc/mediatek/imgsensor/src/common/v1
+          L=drivers/misc/mediatek/lcm
+          S=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_IMGSENSOR=' .config | cut -d'"' -f2)
+          K=""; for x in $S; do [ -d "$D/$x" ] && K="$K $x"; done
+          scripts/config --file .config --set-str CUSTOM_KERNEL_IMGSENSOR "$(echo $K)"
+          C=$(grep -m1 '^CONFIG_CUSTOM_KERNEL_LCM=' .config | cut -d'"' -f2)
+          K2=""; for x in $C; do [ -d "$L/$x" ] && K2="$K2 $x"; done
+          scripts/config --file .config --set-str CUSTOM_KERNEL_LCM "$(echo $K2)"
+          sed -i 's/^\([[:space:]]*\)select CMA_DEBUG$/\1# select CMA_DEBUG  # off to match stock/' mm/Kconfig
+          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          make ARCH=arm64 olddefconfig
+          scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
+          make ARCH=arm64 olddefconfig
+          sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
+          sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
+          sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" prepare > prepare.log 2>&1 || { tail -20 prepare.log; exit 1; }
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" scripts > scripts.log 2>&1 || { tail -20 scripts.log; exit 1; }
+          ls -l include/generated/autoconf.h scripts/genksyms/genksyms
+
+      - name: generate type probe files
         run: |
           set -e
           python3 - <<'PY'
-          import base64, os
-          os.makedirs('/tmp/sl', exist_ok=True)
-          meta = []
-          for line in open('slices.txt', encoding='utf-8'):
-              name, va, n, b64 = line.rstrip('\n').split('\t')
-              data = base64.b64decode(b64)
-              path = '/tmp/sl/%s.bin' % name
-              open(path, 'wb').write(data)
-              meta.append((name, va, len(data)))
-              print('%-45s va=%s bytes=%d' % (name, va, len(data)))
-          open('/tmp/sl/meta.txt', 'w').write('\n'.join('%s\t%s' % (n, v) for n, v, _ in meta) + '\n')
+          groups = {
+            'tpa': [
+              'int','unsigned int','unsigned','unsigned long','long','char','char *',
+              'const char *','void *','void','unsigned char','unsigned char *','bool',
+              'short','unsigned short','int *','unsigned int *','unsigned long *',
+              'unsigned long long','long long','char **','void **','const void *',
+              'const char **','unsigned short *','const unsigned char *',
+              'const unsigned long *','unsigned char **','...',
+            ],
+            'tpb': ['size_t','size_t *','ssize_t','u8','u8 *','u16','u16 *','u32','u32 *',
+                    'u64','u64 *','s32','s32 *','dev_t','kuid_t','gfp_t','off_t','loff_t *',
+                    'sector_t','blkcnt_t','pte_t *'],
+            'tpc': ['struct task_struct *','const struct task_struct *','struct mmc_card *',
+                    'struct mmc_host *','struct sdio_func *','struct pt_regs *',
+                    'struct cdev *','struct module *','struct file *','struct device *',
+                    'struct kobject *','struct sk_buff *','struct sock *','struct net *',
+                    'struct seq_file *','struct dentry *','struct inode *'],
+          }
+          incs = {'tpa': ['<linux/kernel.h>','<linux/module.h>','<linux/types.h>',
+                          '<linux/sched.h>','<linux/fs.h>','<linux/device.h>'],
+                  'tpb': ['<linux/kernel.h>','<linux/module.h>','<linux/types.h>',
+                          '<linux/sched.h>','<linux/fs.h>','<linux/mm.h>','<linux/uidgid.h>'],
+                  'tpc': ['<linux/kernel.h>','<linux/module.h>','<linux/sched.h>',
+                          '<linux/types.h>','<linux/fs.h>','<linux/device.h>','<linux/cdev.h>',
+                          '<linux/mmc/card.h>','<asm/ptrace.h>']}
+          for g, types in groups.items():
+              lines = ['#include %s' % i for i in incs[g]] + ['']
+              idx = []
+              for i, t in enumerate(types, 1):
+                  name = '%s%02d' % (g, i)
+                  lines.append('void %s(%s a) { }' % (name, t))
+                  lines.append('EXPORT_SYMBOL(%s);' % name)
+                  idx.append('%s\t%s' % (name, t))
+              open('/tmp/%s.c' % g, 'w').write('\n'.join(lines) + '\n')
+              open('/tmp/%s.idx' % g, 'w').write('\n'.join(idx) + '\n')
+              print(g, len(types), 'types')
           PY
+          cp /tmp/tpa.idx /tmp/tpb.idx /tmp/tpc.idx "$GITHUB_WORKSPACE/" 2>/dev/null || true
+          ls -l "$GITHUB_WORKSPACE"/*.idx
 
-      - name: disassemble
+      - name: dump each probe
         run: |
           set -e
-          mkdir -p artifacts
-          while IFS=$'\t' read -r name va; do
-            echo "=============== $name (va 0x$va) ===============" | tee -a artifacts/disasm.txt
-            aarch64-linux-gnu-objdump -D -b binary -m aarch64 \
-              --adjust-vma=0x$va /tmp/sl/$name.bin >> artifacts/disasm.txt
-          done < /tmp/sl/meta.txt
-          echo "--- summary of first 24 instructions per symbol ---" > artifacts/disasm-head.txt
-          awk '/^===============/{p=1;c=0} p&&c<26{print;c++}' artifacts/disasm.txt >> artifacts/disasm-head.txt
-          cat artifacts/disasm.txt
+          cd kernel
+          for g in tpa tpb tpc; do
+            echo "===== $g ====="
+            python3 "$GITHUB_WORKSPACE/tools/dump_defs.py" "$GITHUB_WORKSPACE" /tmp/$g.c "$GITHUB_WORKSPACE/adapt.cmd" || echo "dump $g FAILED"
+          done
+          ls -l "$GITHUB_WORKSPACE"/defs-*.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase7-disasm
-          path: artifacts/*
+          name: phase8-typeprobe
+          path: |
+            defs-*.txt
+            ver-*.txt
+            *.idx
           if-no-files-found: warn
