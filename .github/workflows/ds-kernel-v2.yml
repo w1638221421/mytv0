@@ -64,6 +64,13 @@ jobs:
           cp init/.main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
           head -c 400 "$GITHUB_WORKSPACE/adapt.cmd"
 
+      - name: probe pipeline
+        run: |
+          set -e
+          cd kernel
+          python3 "$GITHUB_WORKSPACE/tools/gen_probes.py" "$GITHUB_WORKSPACE/cand.c" "$GITHUB_WORKSPACE/cand.map"
+          python3 "$GITHUB_WORKSPACE/tools/run_candidates.py" "$GITHUB_WORKSPACE"
+
       - name: recover signatures (batched genksyms CRC search)
         run: |
           set -e
