@@ -69,15 +69,27 @@ for line in ver.splitlines():
 print('candidate CRCs produced:', len(crc))
 
 hits = {}
+base_hits = {}
 for line in open(os.path.join(ws, 'cand.map')):
-    name, tag, expect, sig = line.rstrip('\n').split('\t')
+    name, tag, expect, b0, sig = line.rstrip('\n').split('\t')
     got = crc.get(name)
-    if got is not None and got == int(expect, 16):
+    if got is None:
+        continue
+    if got == int(expect, 16):
         hits.setdefault(tag, []).append((sig, got))
+    if b0 != '-' and got == int(b0, 16):
+        base_hits.setdefault(tag, []).append((sig, got))
 
-print('\n=== MATCHES ===')
+print('\n=== PIPELINE SANITY: candidates reproducing the BUILD-0 (GPL) CRC ===')
 order = ['show_stack', 'tracing_record_cmdline', 'mmc_io_rw_direct',
          'dump_thread_state', 'btif_dbg_ctrl']
+for tag in order:
+    for sig, got in base_hits.get(tag, [])[:3]:
+        print('  %-24s %08x  %s' % (tag, got, sig))
+    if not base_hits.get(tag):
+        print('  %-24s (none)' % tag)
+
+print('\n=== PRODUCTION CRC MATCHES ===')
 for tag in order:
     h = hits.get(tag, [])
     if h:
@@ -87,6 +99,11 @@ for tag in order:
         print('  %-24s NO MATCH' % tag)
 
 with open(os.path.join(ws, 'sig-hits.txt'), 'w') as f:
+    f.write('# production CRC matches\n')
     for tag in order:
         for sig, got in hits.get(tag, []):
-            f.write('%s\t%08x\t%s\n' % (tag, got, sig))
+            f.write('PROD\t%s\t%08x\t%s\n' % (tag, got, sig))
+    f.write('# build0 baseline cross-check\n')
+    for tag in order:
+        for sig, got in base_hits.get(tag, []):
+            f.write('BASE\t%s\t%08x\t%s\n' % (tag, got, sig))

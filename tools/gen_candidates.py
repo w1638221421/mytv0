@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""Generate a genksyms candidate file for the 5 residual MTK symbols.
+"""Generate a batched genksyms candidate file for the 5 residual MTK symbols.
 
-Why this works: genksyms computes a symbol's CRC from the *declaration token
-stream* only (the symbol name is not part of the CRC). So we can declare one
-candidate per line under a unique dummy name, EXPORT_SYMBOL it, run genksyms
-once on the whole file, and read every candidate CRC back. A candidate whose
-CRC equals the production CRC is the production signature.
+Why this works: genksyms derives a symbol's CRC from the *declaration token
+stream* only -- the symbol name is not part of the CRC. So we declare one
+candidate per line under a unique dummy name, EXPORT_SYMBOL each of them, run
+the kernel's own genksyms once over the whole file, and read every candidate
+CRC back. A candidate whose CRC equals the production CRC is the production
+signature.
 
 Usage: python3 gen_candidates.py <out.c> <out_map.txt>
+map columns: cand_name, tag, production_crc, build0_crc, signature
 """
-import sys, itertools
+import sys
+import itertools
 
-# types as they appear (already "expanded enough") in kernel declarations.
-# genksyms expands typedefs, so u8 -> unsigned char etc.; both spellings are
-# included where the expansion could land differently.
-P = [
+# parameter type spellings (typedefs are expanded by genksyms, so the plain
+# spellings below are what actually enters the CRC)
+POOL = [
     'struct task_struct *',
     'unsigned long *',
     'unsigned long',
-    'long unsigned int',
     'int',
     'unsigned int',
     'unsigned',
@@ -30,104 +31,102 @@ P = [
     'bool',
     'int *',
     'unsigned int *',
-    'struct task_struct',
-    'long',
-    'struct sdio_func *',
-    'void',
-    'const unsigned long *',
 ]
-R = ['void', 'int', 'unsigned long', 'bool', 'struct task_struct *',
-     'unsigned int', 'long', 'char *']
+RET = ['void', 'int', 'unsigned long', 'bool', 'struct task_struct *']
 
-# production CRCs (from the vendor modules' __versions / stock-modcrcs.txt)
-TARGETS = {
-    'show_stack':              ('19e8e0d1', ['struct task_struct *', 'unsigned long *']),
-    'tracing_record_cmdline':  ('29d73b18', ['struct task_struct *']),
-    'mmc_io_rw_direct':        ('bf9c15ec', ['struct mmc_card *', 'int', 'unsigned',
-                                             'unsigned', 'unsigned char', 'unsigned char *']),
-    'dump_thread_state':       ('dced65b2', ['const char *']),
-    'btif_dbg_ctrl':           ('d53a2b76', ['int', 'int', 'int']),
-}
+# production CRC + BUILD-0 (GPL) CRC for cross-checking the pipeline
+TARGETS = [
+    # tag, production_crc, build0_crc, gpl_baseline_params, strategy, pool
+    ('show_stack',             '19e8e0d1', 'd8a03984',
+     ['struct task_struct *', 'unsigned long *'], 'exhaustive2', POOL),
+    ('tracing_record_cmdline', '29d73b18', 'b7298605',
+     ['struct task_struct *'], 'exhaustive2', POOL),
+    ('mmc_io_rw_direct',       'bf9c15ec', 'f256a148',
+     ['struct mmc_card *', 'int', 'unsigned', 'unsigned', 'unsigned char', 'unsigned char *'],
+     'mutate1', POOL),
+    ('dump_thread_state',      'dced65b2', None,
+     ['const char *'], 'exhaustive2', POOL),
+    ('btif_dbg_ctrl',          'd53a2b76', '864e81df',
+     ['int', 'int', 'int'], 'exhaustive3',
+     ['int', 'unsigned int', 'unsigned long', 'void *', 'char *',
+      'unsigned char', 'unsigned', 'bool']),
+]
+
+CAND = []
 
 
-def candidates(base):
-    """Baseline + single-parameter mutations + drop/append/insert + return changes."""
+def add(tag, rt, ps, expect, b0):
+    n = len(CAND) + 1
+    name = 'cand_%s_%05d' % (tag, n)
+    CAND.append((name, tag, expect, b0, [rt] + list(ps)))
+
+
+def gen(tag, expect, b0, base, strategy, pool):
+    if strategy == 'exhaustive2':
+        # 0, 1 and 2 parameters exhaustively, every return type
+        combos = [[]]
+        combos += [[a] for a in pool]
+        combos += [list(c) for c in itertools.product(pool, repeat=2)]
+    elif strategy == 'exhaustive3':
+        combos = [[]]
+        combos += [[a] for a in pool]
+        combos += [list(c) for c in itertools.product(pool, repeat=2)]
+        combos += [list(c) for c in itertools.product(pool, repeat=3)]
+    else:  # mutate1 -- baseline plus single-parameter mutations
+        combos = [list(base)]
+        n = len(base)
+        for i in range(n):
+            for t in pool:
+                if t == base[i]:
+                    continue
+                ps = list(base); ps[i] = t
+                combos.append(ps)
+        for i in range(n):
+            ps = list(base); del ps[i]
+            combos.append(ps)
+        for t in pool:
+            combos.append(list(base) + [t])
+        for i in range(n + 1):
+            for t in pool:
+                ps = list(base); ps.insert(i, t)
+                combos.append(ps)
     seen = set()
-    out = []
-
-    def add(rt, ps):
-        key = (rt, tuple(ps))
-        if key in seen:
-            return
-        seen.add(key)
-        out.append(key)
-
-    n = len(base)
-    # exact baseline
-    add('void', base)
-    # return-type sweep
-    for rt in R:
-        add(rt, base)
-    # single-parameter substitution
-    for i in range(n):
-        for t in P:
-            if t == base[i]:
+    for ps in combos:
+        for rt in RET:
+            key = (rt, tuple(ps))
+            if key in seen:
                 continue
-            ps = list(base); ps[i] = t
-            add('void', ps)
-            for rt in ('int', 'unsigned long', 'bool'):
-                add(rt, ps)
-    # drop one parameter
-    for i in range(n):
-        ps = list(base); del ps[i]
-        add('void', ps)
-    # append one parameter
-    for t in P:
-        add('void', base + [t])
-    # insert one parameter at every position
-    for i in range(n + 1):
-        for t in P:
-            ps = list(base); ps.insert(i, t)
-            add('void', ps)
-    # two-parameter substitution for short signatures (cheap, exhaustive)
-    if n <= 2:
-        idx = list(range(n))
-        for combo in itertools.combinations(idx, min(2, n)):
-            for ts in itertools.product(P, repeat=len(combo)):
-                ps = list(base)
-                for j, t in zip(combo, ts):
-                    ps[j] = t
-                add('void', ps)
-    return out
+            seen.add(key)
+            add(tag, rt, ps, expect, b0)
 
 
 def main():
     out_c, out_map = sys.argv[1], sys.argv[2]
-    lines = []
-    mapping = []
-    n = 0
-    hdr = [
+    for tag, expect, b0, base, strategy, pool in TARGETS:
+        gen(tag, expect, b0, base, strategy, pool)
+
+    lines = [
         '#include <linux/kernel.h>',
         '#include <linux/module.h>',
         '#include <linux/sched.h>',
         '#include <linux/types.h>',
         '#include <linux/mmc/card.h>',
-        '#include <linux/mmc/sdio_func.h>',
-        '#include <linux/mmc/sdio.h>',
         '',
     ]
-    lines.extend(hdr)
-    for tag, (expect, base) in TARGETS.items():
-        for rt, ps in candidates(base):
-            n += 1
-            name = 'cand_%s_%04d' % (tag, n)
-            decl = '%s %s(%s);' % (rt, name, ', '.join(ps) if ps else 'void')
-            lines.append(decl)
-            lines.append('EXPORT_SYMBOL(%s);' % name)
-            mapping.append('%s\t%s\t%s\t%s' % (name, tag, expect, ' | '.join([rt] + list(ps))))
+    mapping = []
+    for name, tag, expect, b0, ps in CAND:
+        rt = ps[0]
+        params = ps[1:]
+        lines.append('%s %s(%s);' % (rt, name, ', '.join(params) if params else 'void'))
+        lines.append('EXPORT_SYMBOL(%s);' % name)
+        mapping.append('%s\t%s\t%s\t%s\t%s' % (name, tag, expect, b0 or '-',
+                                              ' | '.join(ps)))
     open(out_c, 'w').write('\n'.join(lines) + '\n')
     open(out_map, 'w').write('\n'.join(mapping) + '\n')
-    print('candidates written: %d -> %s' % (len(mapping), out_c))
+    print('candidates: %d' % len(CAND))
+    for tag, expect, b0, base, strategy, pool in TARGETS:
+        c = sum(1 for x in CAND if x[1] == tag)
+        print('  %-24s %6d  (prod %s, build0 %s)' % (tag, c, expect, b0))
 
 
 if __name__ == '__main__':

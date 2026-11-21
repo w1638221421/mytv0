@@ -1,77 +1,10 @@
-name: phase4
+name: phase4-sigrec2
 on:
   push:
     branches: [ds-kernel-v2]
   workflow_dispatch:
 
 jobs:
-  route3:
-    name: route3-build-gate
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: deps
-        run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bc bison flex libssl-dev python2.7 libpython2.7-stdlib git patch
-          sudo ln -sf /usr/bin/python2.7 /usr/bin/python
-
-      - name: toolchain
-        run: |
-          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 "${GITHUB_WORKSPACE}/gcc49"
-
-      - name: clone sources
-        run: |
-          set -e
-          git clone --depth=1 -b og https://github.com/paperluigis/android-huawei-dura-kernel kernel3
-          cp -r kernel3 kernelref
-          mkdir -p artifacts
-          git -C kernel3 rev-parse HEAD > artifacts/commit.txt
-          cat artifacts/commit.txt
-
-      - name: route-3 patch
-        run: |
-          set -e
-          cd kernel3
-          python3 "$GITHUB_WORKSPACE/tools/route3_patch.py" .
-          cd "$GITHUB_WORKSPACE"
-          git -C kernel3 diff > artifacts/route3.patch || true
-          echo "--- patch ---"
-          cat artifacts/route3.patch
-
-      - name: BUILD-3 route3
-        run: |
-          set -e
-          chmod +x "$GITHUB_WORKSPACE/tools/buildone.sh"
-          if ! bash "$GITHUB_WORKSPACE/tools/buildone.sh" "$GITHUB_WORKSPACE/kernel3" BUILD-3 route3; then
-            echo "=== ERROR LINES ==="
-            grep -nE "error:|fatal error|undefined reference|No rule to make|multiple definition|Error [0-9]" "$GITHUB_WORKSPACE/BUILD-3.log" | head -40 || true
-            echo "=== TAIL ==="
-            tail -40 "$GITHUB_WORKSPACE/BUILD-3.log" || true
-            mkdir -p "$GITHUB_WORKSPACE/artifacts/BUILD-3"
-            cp "$GITHUB_WORKSPACE/BUILD-3.log" "$GITHUB_WORKSPACE/artifacts/BUILD-3/build.log" || true
-            exit 1
-          fi
-
-      - name: BUILD-0 reference
-        run: |
-          set -e
-          bash "$GITHUB_WORKSPACE/tools/buildone.sh" "$GITHUB_WORKSPACE/kernelref" BUILD-0 stock
-
-      - name: gate
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          python3 "$GITHUB_WORKSPACE/tools/gate.py"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: phase4-route3
-          path: artifacts/**
-          if-no-files-found: warn
-
   sigrec:
     name: sigrec
     runs-on: ubuntu-22.04
@@ -112,14 +45,13 @@ jobs:
           scripts/config --file .config --disable CMA_DEBUG --disable CMA_DEBUGFS
           make ARCH=arm64 olddefconfig
           sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' .config || true
-          python3 "$GITHUB_WORKSPACE/tools/fix_source_includes.py" .
           sed -i 's/const_debug unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/g' kernel/sched/fair.c
           sed -i 's/extern const_debug unsigned int sysctl_sched_migration_cost/extern unsigned int sysctl_sched_migration_cost/g' kernel/sched/sched.h
           make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" prepare > prepare.log 2>&1 || { tail -30 prepare.log; exit 1; }
           ls -l include/generated/autoconf.h
           echo "prepare ok"
 
-      - name: genksyms + adapter object (capture exact cflags)
+      - name: genksyms + reference object (capture exact cflags)
         run: |
           set -e
           cd kernel
@@ -127,9 +59,9 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" scripts > scripts.log 2>&1 || { tail -30 scripts.log; exit 1; }
           ls -l scripts/genksyms/genksyms
-          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" drivers/misc/mediatek/connectivity/common/connectivity_build_in_adapter.o > adapt.log 2>&1 || { tail -40 adapt.log; exit 1; }
-          cp drivers/misc/mediatek/connectivity/common/.connectivity_build_in_adapter.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
-          head -c 600 "$GITHUB_WORKSPACE/adapt.cmd"
+          make ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" -j"$(nproc)" init/main.o > ref.log 2>&1 || { tail -40 ref.log; exit 1; }
+          cp .init/main.o.cmd "$GITHUB_WORKSPACE/adapt.cmd"
+          head -c 400 "$GITHUB_WORKSPACE/adapt.cmd"
 
       - name: recover signatures (batched genksyms CRC search)
         run: |
@@ -141,11 +73,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase4-sigrec
+          name: phase4-sigrec2
           path: |
             cand.map
             cand.ver
             sig-hits.txt
             adapt.cmd
-            cand.i
           if-no-files-found: warn
